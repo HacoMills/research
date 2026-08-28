@@ -30,10 +30,9 @@ Walk-forward 训练 XGBoost           ← 滚动切窗口，每个窗口只用�
 波动率突破策略回测（含滑点/手续费/移动止损）
       │
       ▼
-1000 次蒙特卡洛压力测试              ← 用分布而不是单条曲线评估稳健性
+蒙特卡洛压力测试              ← 用分布而不是单条曲线评估稳健性
 ```
 
-每一步都刻意避免"未来偷看过去"：GARCH 是滚动样本外预测，XGBoost 是 walk-forward 训练，回测里手续费、滑点、盘中真实触碰都被显式建模。
 
 ## 结果演进
 
@@ -42,10 +41,9 @@ Walk-forward 训练 XGBoost           ← 滚动切窗口，每个窗口只用�
 | 阶段 | 成交价假设 | 年化收益 / 90天蒙特卡洛均值 |
 |---|---|---|
 | 初版回测 | 理论屏障价直接成交，只用收盘价判断触碰 | CAGR 182.43%，Calmar 8.68 |
-| 1000次蒙特卡洛压力测试（同一假设） | 同上 | 90天均值 +32.80%，95% VaR -7.39% |
+| 蒙特卡洛压力测试（同一假设） | 同上 | 90天均值 +32.80%，95% VaR -7.39% |
 | **最终修正版**（本仓库 `src/strategy.py`） | 用 high/low 判断真实触碰 + 触碰滑点 + 下单滑点 | **年化 -0.75% ~ -3.6%**（不同 trail_mult 参数下） |
 
-> 完整数据见 `notebooks/research_exploration.ipynb` 对应 cell。第一行数字好看的原因是假设模型总能精确地在理论屏障价成交——这在实盘中不现实；第三行是把这个假设拿掉之后的结果，也是更值得相信的数字。
 
 ![GARCH 动态 VaR](results/garch_dynamic_var.png)
 *滚动 GARCH 预测的样本外波动率与 99% VaR（防暴涨/防暴跌两条动态防线）*
@@ -57,23 +55,22 @@ Walk-forward 训练 XGBoost           ← 滚动切窗口，每个窗口只用�
 
 - **这套方法本身已经被排查得比较彻底**：三种标签定义（方向/突破）、多组特征（技术指标/regime/资金费率）、多种回测执行假设（理论价→收盘价→高低点真实触碰）、大范围参数扫描（阈值/止盈止损/追踪距离/持仓时长），每一条能想到的路径都试过，而且每次深挖都发现之前的"好消息"建立在某个不成立的假设上。
 - **但"这套方法没用"不等于"这个市场没有任何可预测性"**：所有特征本质上都来自同一份 OHLCV 衍生数据，彼此高度相关；资金费率、持仓量这类衍生品特有信息因为 OKX API 历史只有约 3 个月，样本量太小，严格说是"未完成"而不是"已证伪"；15分钟到3小时这个频段恰好是做市商/高频/套利机器人竞争最激烈的区域。
-- 结论：最终交付的 `src/strategy.py` 是那个诚实的、执行假设最贴近真实的版本，它的回测结果是负的。
 
 ## 仓库结构
 
 ```
 ├── src/
-│   ├── config.py        # 全局参数（密钥从环境变量读取，不硬编码）
+│   ├── config.py        # 全局参数
 │   ├── data_fetch.py     # OKX历史数据抓取
 │   ├── diagnostics.py    # ADF / ARCH-LM 检验
 │   ├── garch_vol.py      # 滚动窗口 GARCH 样本外波动率与 VaR
 │   ├── features.py       # 特征工程
 │   ├── labeling.py       # 三重屏障标签
 │   ├── model.py           # Walk-forward XGBoost 训练
-│   ├── strategy.py        # 最终版波动率突破策略（回测引擎）
+│   ├── strategy.py        # 最终版波动率突破策略
 │   ├── stress_test.py     # 蒙特卡洛压力测试
 │   └── pipeline.py        # 串起以上所有步骤的端到端流水线
-├── results/                # 关键图表
+├── results/               
 ├── requirements.txt
 ├── .env.example
 └── .gitignore
@@ -84,7 +81,7 @@ Walk-forward 训练 XGBoost           ← 滚动切窗口，每个窗口只用�
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env   # 纯回测不需要改这个文件；只有要抓鉴权接口数据时才需要填 OKX key
+cp .env.example .env   
 ```
 
 ```python
@@ -96,7 +93,7 @@ from src.stress_test import run_stress_test, summarize_stress_test
 exchange = build_public_exchange()
 df_raw = fetch_large_ohlcv_okx(exchange, symbol="BTC/USDT", timeframe="15m", target_limit=50000)
 
-df_final = build_final_dataset(df_raw)          # 较耗时：滚动GARCH + walk-forward训练
+df_final = build_final_dataset(df_raw)          
 strategy = build_default_strategy()
 trades = strategy.run_backtest(df_final)
 
@@ -108,6 +105,6 @@ print(summarize_stress_test(stress_results))
 
 - 资金费率、持仓量比这类衍生品特有信息因为交易所 API 历史数据只有约 3 个月，没能得出统计显著的结论，是明确标注为"未完成"的方向。
 - 15分钟这个频段本身竞争激烈，后续更值得尝试拉长到 1 小时甚至更长周期，用信噪比换稳定性。
-- `notebooks/research_exploration.ipynb` 里有一处代码坏味道值得说明：探索过程中出现过一个只存在于当时 Jupyter 内核内存、没有被保存进 `.ipynb` 文件的中间类（`VolatilityBreakoutStrategy_Mid`）。打包时已经在 `src/strategy.py` 里把它和它的最终子类合并重建为一个自洽、可独立运行的版本，并在代码注释里说明了原委。
+
 
 
