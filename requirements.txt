@@ -1,0 +1,13 @@
+numpy
+pandas
+pandas_ta
+ccxt
+matplotlib
+seaborn
+scipy
+statsmodels
+scikit-learn
+xgboost
+arch
+tqdm
+python-dotenv
