@@ -1,24 +1,34 @@
-# 密钥与环境变量
+# ── 密钥 (绝对不能上传) ──
 .env
+*.env
+config.json
+**/config.json
 
-# 数据文件（体积大且是可复现生成的中间产物，不适合进仓库）
+# ── 数据 (CSMAR 有版权; 体积大; 删了会自动重新下载) ──
+data/raw/
+data/cache/
+data/data_cache/
+*.pkl
 *.csv
-data/
+*.xlsx
+*.xls
+*.parquet
+*.h5
 
-# Python
+# ── 模型文件 / 大文件 ──
+strategies/15min_garch/xgb_alpha_model.json
+
+# ── 报告里的日收益明细 (可重新生成) ──
+reports/**/*_returns.csv
+
+# ── Python / 编辑器 ──
 __pycache__/
 *.pyc
-*.pyo
-.pytest_cache/
-*.egg-info/
-.venv/
-venv/
-env/
-
-# Jupyter
 .ipynb_checkpoints/
-
-# 系统/编辑器
-.DS_Store
-.idea/
 .vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ── 旧版输出 ──
+strategies/turtle/archive/claude_outputs/

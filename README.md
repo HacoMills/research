@@ -1,110 +1,41 @@
-# BTC 15分钟波动率突破策略研究
-
-用 GARCH 动态波动率 + XGBoost + 三重屏障标签，研究 BTC/USDT 永续合约在 15 分钟 K 线上是否存在可交易的短周期 alpha。这是一份完整的量化研究记录：数据管道、统计检验、建模、回测、稳健性压力测试，以及最后对结果的复盘。
-
-## 结论
-
-**在当前这套方法（纯 OHLCV 衍生特征 + XGBoost + GARCH 动态屏障）下，没有找到经得起真实成本检验的正期望。** 早期版本的回测（年化 182%、Calmar 8.68）建立在偏乐观的成交假设上；把成交判定换成用 K 线的 high/low 真实触碰、并加入触碰滑点这类更贴近实盘的执行细节后，同一策略的年化收益变成 **-0.75% ~ -3.6%**（见下方"结果演进"）。这不是说加密货币短周期完全不可预测，而是这一批特征、这一套方法论，在这个频段上，信息含量已经接近天花板。详细见后文。
-
-## 方法论流水线
+# quant — 量化研究
 
 ```
-OKX 历史 15m OHLCV
-      │
-      ▼
-ADF 平稳性检验 + ARCH-LM 效应检验   ← 判断"该不该上 GARCH"的前置检验
-      │
-      ▼
-滚动窗口 GARCH(1,1)                ← 每个时刻的波动率预测只用它之前的数据拟合，无未来函数
-      │
-      ▼
-特征工程（技术指标 + GARCH衍生 + 趋势/regime特征）
-      │
-      ▼
-三重屏障标签（屏障宽度 = GARCH VaR 的动态倍数）
-      │
-      ▼
-Walk-forward 训练 XGBoost           ← 滚动切窗口，每个窗口只用它之前的数据训练
-      │
-      ▼
-波动率突破策略回测（含滑点/手续费/移动止损）
-      │
-      ▼
-蒙特卡洛压力测试              ← 用分布而不是单条曲线评估稳健性
+quant/
+├── data/         数据 (raw 手动下载 / cache 自动下载) 和取数代码, 见 data/README.md
+├── backtest/     分层回测框架 (数据接口→信号→过滤→执行→组合→稳定性→报告), 各项目共用
+├── strategies/   代码, 每个项目一个文件夹, 各自有 README
+├── figures/      图片, 按项目分文件夹
+├── reports/      报告, 按项目分文件夹
+└── notes/        学习笔记、临时实验
 ```
 
+## 项目
 
-## 结果演进
-
-这是这份研究里最有价值的部分：同一个策略框架，随着执行假设越来越贴近真实交易，结果如何变化。
-
-| 阶段 | 成交价假设 | 年化收益 / 90天蒙特卡洛均值 |
+| 项目 | 内容 | 状态 |
 |---|---|---|
-| 初版回测 | 理论屏障价直接成交，只用收盘价判断触碰 | CAGR 182.43%，Calmar 8.68 |
-| 蒙特卡洛压力测试（同一假设） | 同上 | 90天均值 +32.80%，95% VaR -7.39% |
-| **最终修正版**（本仓库 `src/strategy.py`） | 用 high/low 判断真实触碰 + 触碰滑点 + 下单滑点 | **年化 -0.75% ~ -3.6%**（不同 trail_mult 参数下） |
+| `strategies/turtle/` | 趋势策略：回测配置 (唐奇安 / TSMOM / 均线, GARCH / VIX 过滤)，实盘信号、看盘 | 进行中，见 README |
+| `strategies/_template/` | 新策略模板：复制一份改名即可 | |
+| `strategies/15min_garch/` | BTC 15 分钟 GARCH + XGBoost 方向预测 | 已结束 (方向 alpha 被证伪) |
+| `strategies/ff3/` | A股 Fama-French 三因子 | |
+| `strategies/6hmom/` | 6 小时动量 | |
 
+## 回测
 
-![GARCH 动态 VaR](results/garch_dynamic_var.png)
-*滚动 GARCH 预测的样本外波动率与 99% VaR（防暴涨/防暴跌两条动态防线）*
-
-![蒙特卡洛压力测试分布](results/monte_carlo_distribution.png)
-*1000 次随机 90 天片段回测的收益分布（对应上表"初版假设"下的结果）*
-
-## 复盘：
-
-- **这套方法本身已经被排查得比较彻底**：三种标签定义（方向/突破）、多组特征（技术指标/regime/资金费率）、多种回测执行假设（理论价→收盘价→高低点真实触碰）、大范围参数扫描（阈值/止盈止损/追踪距离/持仓时长），每一条能想到的路径都试过，而且每次深挖都发现之前的"好消息"建立在某个不成立的假设上。
-- **但"这套方法没用"不等于"这个市场没有任何可预测性"**：所有特征本质上都来自同一份 OHLCV 衍生数据，彼此高度相关；资金费率、持仓量这类衍生品特有信息因为 OKX API 历史只有约 3 个月，样本量太小，严格说是"未完成"而不是"已证伪"；15分钟到3小时这个频段恰好是做市商/高频/套利机器人竞争最激烈的区域。
-
-## 仓库结构
+所有策略共用 `backtest/` 框架，在 quant 根目录运行：
 
 ```
-├── src/
-│   ├── config.py        # 全局参数
-│   ├── data_fetch.py     # OKX历史数据抓取
-│   ├── diagnostics.py    # ADF / ARCH-LM 检验
-│   ├── garch_vol.py      # 滚动窗口 GARCH 样本外波动率与 VaR
-│   ├── features.py       # 特征工程
-│   ├── labeling.py       # 三重屏障标签
-│   ├── model.py           # Walk-forward XGBoost 训练
-│   ├── strategy.py        # 最终版波动率突破策略
-│   ├── stress_test.py     # 蒙特卡洛压力测试
-│   └── pipeline.py        # 串起以上所有步骤的端到端流水线
-├── results/               
-├── requirements.txt
-├── .env.example
-└── .gitignore
+python -m backtest strategies/turtle/configs/cross_asset.toml
+python -m backtest strategies/<策略>/configs/<实验>.toml
 ```
 
+写新策略见 `backtest/README.md`。
 
-## 运行代码
+## 规则
 
-```bash
-pip install -r requirements.txt
-cp .env.example .env   
-```
-
-```python
-from src.data_fetch import build_public_exchange, fetch_large_ohlcv_okx
-from src.pipeline import build_final_dataset
-from src.strategy import build_default_strategy
-from src.stress_test import run_stress_test, summarize_stress_test
-
-exchange = build_public_exchange()
-df_raw = fetch_large_ohlcv_okx(exchange, symbol="BTC/USDT", timeframe="15m", target_limit=50000)
-
-df_final = build_final_dataset(df_raw)          
-strategy = build_default_strategy()
-trades = strategy.run_backtest(df_final)
-
-stress_results = run_stress_test(df_final, strategy, n_samples=200, segment_days=90)
-print(summarize_stress_test(stress_results))
-```
-
-## 局限性与后续方向
-
-- 资金费率、持仓量比这类衍生品特有信息因为交易所 API 历史数据只有约 3 个月，没能得出统计显著的结论，是明确标注为"未完成"的方向。
-- 15分钟这个频段本身竞争激烈，后续更值得尝试拉长到 1 小时甚至更长周期，用信噪比换稳定性。
-
-
-
+1. **代码**放 `strategies/<项目>/`，回测配置放 `strategies/<项目>/configs/`
+2. **原始数据**放 `data/raw/`，**自动缓存**放 `data/cache/` (代码会自动放)
+3. **图片**放 `figures/<项目>/`，**报告**放 `reports/<项目>/`
+4. 每个项目一个 `README.md`：干什么、怎么运行、结果在哪
+5. 旧版本代码不删，放进项目的 `archive/`
+6. 所有路径从 `data/paths.py` 取，不在脚本里写死

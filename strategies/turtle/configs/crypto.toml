@@ -1,0 +1,35 @@
+# 加密货币 (OKX 永续合约, 15 分钟数据合成各周期)
+# 运行 (在 quant 根目录): python -m backtest strategies/turtle/configs/crypto.toml
+name  = "crypto"
+title = "加密货币多周期回测"
+
+[universe]
+"加密" = ["crypto:BTC", "crypto:ETH", "crypto:SOL", "crypto:XRP", "crypto:DOGE", "crypto:ADA",
+        "crypto:AVAX", "crypto:LINK", "crypto:DOT", "crypto:LTC", "crypto:BCH", "crypto:TRX",
+        "crypto:UNI", "crypto:ATOM"]
+
+[data]
+start        = "2022-01-01"
+crypto_start = "2022-01-01"           # 15 分钟缓存按这个日期命名, 与旧脚本共用
+timeframes   = ["1h", "4h", "1d"]     # 可选 15min / 30min / 1h / 4h / 1d / 1w; 多个周期 = 跨周期组合
+
+[strategy]
+signal = "donchian:60,20"
+filter = "none"                       # vix:low,80 默认用美国 VIX (滞后一天)
+
+[portfolio]
+weighting  = "instrument"
+target_vol = 0
+
+[robustness]
+enabled   = false
+oos_start = "2024-07-01"
+signals   = ["donchian:60,20", "donchian:20,10", "tsmom:30", "tsmom:90", "ma:20,100"]
+filters   = ["none", "garch", "vix:low,80", "vix:high,50"]
+bootstrap = 1000
+cost_multipliers = [0, 1, 2, 4]
+
+[robustness.grid]
+donchian = [[10, 20, 40, 60, 100], [5, 10, 20, 30]]
+tsmom    = [[7, 14, 30, 60, 90, 180]]
+ma       = [[5, 10, 20, 50], [50, 100, 200]]

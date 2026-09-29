@@ -1,0 +1,763 @@
+#!/usr/bin/env python3
+"""
+═══════════════════════════════════════════════════════════════
+  海龟交易系统 — GARCH 版 Streamlit 仪表盘
+
+  只监控 BTC 和 ETH, 集成 GARCH(1,1) 波动率过滤:
+    1. 信号总览 (入场/出场 + GARCH 过滤状态)
+    2. GARCH 条件波动率曲线 + 波动率扩张/收缩标记
+    3. K线图 + 唐奇安通道 + ATR
+    4. 仓位计算 (unit_size, 止损价, 风险金额)
+    5. Telegram 通知 (可选)
+    6. 每 4 小时自动刷新
+
+  使用:
+    streamlit run turtle_dashboard_garch.py
+
+  依赖:
+    pip install streamlit plotly arch ccxt pandas numpy
+═══════════════════════════════════════════════════════════════
+"""
+
+import sys, os, json, time, warnings
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+warnings.filterwarnings('ignore')
+
+# ── 项目路径 ──
+_project_root = str(next(p for p in Path(__file__).resolve().parents if (p / "data" / "paths.py").exists()))   # 往上找含 data/paths.py 的文件夹 = quant 根目录 (挪位置也不怕)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
+from data.fetch_data import (
+    create_exchange, fetch_ohlcv, short_name,
+    fetch_account_positions, fetch_account_balance, has_auth_config,
+    _find_config_json,
+)
+
+# ════════════════════════════════════════════════════════════════
+#  参数
+# ════════════════════════════════════════════════════════════════
+
+# 只监控 BTC 和 ETH
+SYMBOLS = ['BTC/USDT:USDT', 'ETH/USDT:USDT']
+
+# 海龟参数 (System2: 60/20, 回测结论更稳)
+LONG_ENTRY  = 60
+LONG_EXIT   = 20
+SHORT_ENTRY = 60
+SHORT_EXIT  = 20
+LONG_STOP   = 2.0
+SHORT_STOP  = 2.0
+ATR_PERIOD  = 20
+RISK_PCT    = 0.01
+CAPITAL     = 10000
+TIMEFRAME   = '4h'
+EXCHANGE_ID = 'okx'
+NEAR_PCT    = 2.0
+
+# GARCH 参数
+GARCH_LOOKBACK = 120   # GARCH 滚动均值窗口 (4h K线, ≈20天)
+
+REFRESH_SECONDS = 4 * 3600   # 4 小时自动刷新
+
+TF_MINUTES = {'1m':1, '5m':5, '15m':15, '30m':30, '1h':60,
+              '2h':120, '4h':240, '6h':360, '8h':480, '12h':720,
+              '1d':1440, '3d':4320, '1w':10080}
+
+
+# ════════════════════════════════════════════════════════════════
+#  工具函数
+# ════════════════════════════════════════════════════════════════
+
+def compute_atr(high, low, close, period):
+    """指数加权 ATR (与回测一致)."""
+    tr = pd.concat([
+        high - low,
+        (high - close.shift(1)).abs(),
+        (low  - close.shift(1)).abs(),
+    ], axis=1).max(axis=1)
+    return tr.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+
+
+def calc_start_date(tf, bars_needed):
+    mins = TF_MINUTES.get(tf, 240)
+    delta = timedelta(minutes=mins * bars_needed * 1.5)
+    return (datetime.now(timezone.utc) - delta).strftime('%Y-%m-%d')
+
+
+def fmt_price(p):
+    if p >= 1000:   return f'{p:,.0f}'
+    if p >= 1:      return f'{p:,.2f}'
+    if p >= 0.01:   return f'{p:,.4f}'
+    return f'{p:,.6f}'
+
+
+# ════════════════════════════════════════════════════════════════
+#  GARCH(1,1) 波动率过滤器
+# ════════════════════════════════════════════════════════════════
+
+def compute_garch_volatility(df, lookback=GARCH_LOOKBACK):
+    """
+    计算 GARCH(1,1) 条件波动率和过滤信号.
+
+    返回 dict:
+      - cond_vol: 条件波动率 Series
+      - vol_ma: 波动率滚动均值 Series
+      - expanding: 布尔 Series (True = 波动率扩张, 允许入场)
+      - alpha: GARCH α 参数
+      - beta: GARCH β 参数
+      - omega: GARCH ω 参数
+      - pct_on: 允许入场时间占比
+    失败返回 None
+    """
+    try:
+        from arch import arch_model
+    except ImportError:
+        st.error("需要安装 arch 库: pip install arch --break-system-packages")
+        return None
+
+    close = df['close'].dropna()
+    if len(close) < 200:
+        st.warning("数据不足 200 根 K 线, 无法拟合 GARCH")
+        return None
+
+    # 对数收益率 (×100, arch 库习惯)
+    log_ret = (np.log(close / close.shift(1)) * 100).dropna()
+
+    try:
+        model = arch_model(log_ret, vol='Garch', p=1, q=1,
+                           mean='Zero', rescale=False)
+        res = model.fit(disp='off', show_warning=False)
+    except Exception as e:
+        st.warning(f"GARCH 拟合失败: {e}")
+        return None
+
+    # 条件波动率
+    cond_vol = res.conditional_volatility
+
+    # 滚动均值
+    vol_ma = cond_vol.rolling(window=lookback).mean()
+
+    # σ_t > σ̄ → 波动率扩张 → 允许入场
+    expanding = cond_vol > vol_ma
+
+    # 对齐回原始 df 的 index
+    cond_vol_aligned = pd.Series(np.nan, index=df.index)
+    cond_vol_aligned.loc[cond_vol.index] = cond_vol.values
+
+    vol_ma_aligned = pd.Series(np.nan, index=df.index)
+    vol_ma_aligned.loc[vol_ma.index] = vol_ma.values
+
+    expanding_aligned = pd.Series(False, index=df.index)
+    expanding_aligned.loc[expanding.index] = expanding.values
+
+    alpha = res.params.get('alpha[1]', 0)
+    beta  = res.params.get('beta[1]', 0)
+    omega = res.params.get('omega', 0)
+    pct_on = expanding.sum() / len(expanding) * 100
+
+    return {
+        'cond_vol': cond_vol_aligned,
+        'vol_ma': vol_ma_aligned,
+        'expanding': expanding_aligned,
+        'alpha': alpha,
+        'beta': beta,
+        'omega': omega,
+        'pct_on': pct_on,
+    }
+
+
+# ════════════════════════════════════════════════════════════════
+#  Telegram 通知
+# ════════════════════════════════════════════════════════════════
+
+def send_telegram(message):
+    """通过 Telegram Bot 发送消息."""
+    cfg = _find_config_json()
+    token   = cfg.get('telegram_token', '')
+    chat_id = cfg.get('telegram_chat_id', '')
+    if not token or not chat_id:
+        return False
+
+    import urllib.request, ssl
+
+    url = f'https://api.telegram.org/bot{token}/sendMessage'
+    data = json.dumps({
+        'chat_id': chat_id,
+        'text': message,
+        'parse_mode': 'HTML',
+    }).encode('utf-8')
+
+    req = urllib.request.Request(url, data=data, headers={
+        'Content-Type': 'application/json',
+    })
+
+    proxy = cfg.get('proxy', '')
+    handlers = []
+    if proxy:
+        handlers.append(urllib.request.ProxyHandler({
+            'http': proxy, 'https': proxy,
+        }))
+    handlers.append(urllib.request.HTTPSHandler(
+        context=ssl.create_default_context()))
+    opener = urllib.request.build_opener(*handlers)
+
+    try:
+        resp = opener.open(req, timeout=10)
+        return resp.status == 200
+    except Exception as e:
+        st.warning(f'Telegram 发送失败: {e}')
+        return False
+
+
+def has_telegram_config():
+    cfg = _find_config_json()
+    return bool(cfg.get('telegram_token') and cfg.get('telegram_chat_id'))
+
+
+def notify_signals(signals):
+    """有重要信号时推送 Telegram."""
+    important = [s for s in signals
+                 if s['signal_type'].startswith(('entry_', 'exit_'))]
+    if not important:
+        return
+
+    now = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+    lines = [f'🐢 <b>GARCH 海龟信号</b>  {now}\n']
+
+    for s in important:
+        emoji = '🟢' if 'entry_long' in s['signal_type'] else \
+                '🔴' if 'entry_short' in s['signal_type'] else '⚠️'
+        lines.append(f'{emoji} <b>{s["name"]}</b>  {s["signal"]}')
+        lines.append(f'    价格: {fmt_price(s["price"])}  ATR: {fmt_price(s["atr"])}')
+        garch_status = '✅ 允许' if s.get('garch_expanding') else '🚫 过滤'
+        lines.append(f'    GARCH: {garch_status}  σ: {s.get("garch_vol", 0):.4f}')
+        if s.get('suggested_stop'):
+            lines.append(f'    止损: {fmt_price(s["suggested_stop"])}')
+        if s.get('detail'):
+            lines.append(f'    {s["detail"]}')
+        lines.append('')
+
+    send_telegram('\n'.join(lines))
+
+
+# ════════════════════════════════════════════════════════════════
+#  数据扫描
+# ════════════════════════════════════════════════════════════════
+
+def scan_symbol_garch(df, symbol, garch_info, positions):
+    """扫描单个品种 (含 GARCH), 返回信号字典."""
+    name = short_name(symbol)
+    atr_s  = compute_atr(df['high'], df['low'], df['close'], ATR_PERIOD)
+    up_l   = df['high'].rolling(LONG_ENTRY).max().shift(1)
+    lo_l   = df['low'].rolling(LONG_EXIT).min().shift(1)
+    lo_s   = df['low'].rolling(SHORT_ENTRY).min().shift(1)
+    up_s   = df['high'].rolling(SHORT_EXIT).max().shift(1)
+
+    price    = df['close'].iloc[-1]
+    atr_val  = atr_s.iloc[-1]
+    ch_up    = up_l.iloc[-1]
+    ch_lo    = lo_s.iloc[-1]
+    exit_lo  = lo_l.iloc[-1]
+    exit_up  = up_s.iloc[-1]
+
+    # GARCH 当前值
+    garch_expanding = False
+    garch_vol = 0.0
+    garch_vol_ma = 0.0
+    if garch_info:
+        garch_expanding = bool(garch_info['expanding'].iloc[-1])
+        garch_vol = garch_info['cond_vol'].iloc[-1] if not pd.isna(garch_info['cond_vol'].iloc[-1]) else 0
+        garch_vol_ma = garch_info['vol_ma'].iloc[-1] if not pd.isna(garch_info['vol_ma'].iloc[-1]) else 0
+
+    if pd.isna(atr_val) or pd.isna(ch_up):
+        return dict(name=name, symbol=symbol, price=price,
+                    signal='数据不足', signal_type='none',
+                    upper=0, lower=0, atr=0,
+                    exit_lower=0, exit_upper=0,
+                    garch_expanding=garch_expanding, garch_vol=garch_vol,
+                    garch_vol_ma=garch_vol_ma,
+                    df=df, atr_series=atr_s, garch_info=garch_info,
+                    up_l=up_l, lo_l=lo_l, lo_s=lo_s, up_s=up_s)
+
+    base = dict(name=name, symbol=symbol, price=price,
+                upper=ch_up, lower=ch_lo, atr=atr_val,
+                exit_upper=exit_up, exit_lower=exit_lo,
+                signal='', signal_type='none', detail='',
+                suggested_qty=0, suggested_stop=0, risk_usdt=0,
+                garch_expanding=garch_expanding, garch_vol=garch_vol,
+                garch_vol_ma=garch_vol_ma,
+                df=df, atr_series=atr_s, garch_info=garch_info,
+                up_l=up_l, lo_l=lo_l, lo_s=lo_s, up_s=up_s)
+
+    pos = positions.get(symbol)
+
+    # ── 持仓检查出场 ──
+    if pos:
+        d = pos['direction']
+        if d == 'long':
+            if price <= pos['stop_loss']:
+                base.update(signal='⚠ 多头止损', signal_type='exit_stop',
+                    detail=f"价格 {fmt_price(price)} ≤ 止损 {fmt_price(pos['stop_loss'])}")
+            elif price < exit_lo:
+                base.update(signal='◀ 多头出场', signal_type='exit_channel',
+                    detail=f"价格 {fmt_price(price)} < {LONG_EXIT}周期低点 {fmt_price(exit_lo)}")
+            else:
+                pnl = pos['quantity'] * (price - pos['entry_price'])
+                pct = (price / pos['entry_price'] - 1) * 100
+                exit_dist = (price - exit_lo) / price * 100
+                base.update(signal=f"● 持多 {pct:+.1f}%", signal_type='holding_long',
+                    detail=f"入场 {fmt_price(pos['entry_price'])}  "
+                           f"止损 {fmt_price(pos['stop_loss'])}  "
+                           f"出场线 {fmt_price(exit_lo)} (距 {exit_dist:.1f}%)  "
+                           f"浮盈 {pnl:+,.0f} USDT")
+        else:
+            if price >= pos['stop_loss']:
+                base.update(signal='⚠ 空头止损', signal_type='exit_stop',
+                    detail=f"价格 {fmt_price(price)} ≥ 止损 {fmt_price(pos['stop_loss'])}")
+            elif price > exit_up:
+                base.update(signal='◀ 空头出场', signal_type='exit_channel',
+                    detail=f"价格 {fmt_price(price)} > {SHORT_EXIT}周期高点 {fmt_price(exit_up)}")
+            else:
+                pnl = pos['quantity'] * (pos['entry_price'] - price)
+                pct = (pos['entry_price'] / price - 1) * 100
+                exit_dist = (exit_up - price) / price * 100
+                base.update(signal=f"● 持空 {pct:+.1f}%", signal_type='holding_short',
+                    detail=f"入场 {fmt_price(pos['entry_price'])}  "
+                           f"止损 {fmt_price(pos['stop_loss'])}  "
+                           f"出场线 {fmt_price(exit_up)} (距 {exit_dist:.1f}%)  "
+                           f"浮盈 {pnl:+,.0f} USDT")
+        return base
+
+    # ── 空仓: 检查入场信号 ──
+    if price > ch_up:
+        qty  = (CAPITAL * RISK_PCT) / atr_val
+        stop = price - LONG_STOP * atr_val
+        if garch_expanding:
+            base.update(signal='★ 做多信号 (GARCH ✅)', signal_type='entry_long',
+                suggested_qty=qty, suggested_stop=stop,
+                risk_usdt=CAPITAL * RISK_PCT,
+                detail=f"价格 {fmt_price(price)} > {LONG_ENTRY}周期高点 {fmt_price(ch_up)}"
+                       f" | GARCH 波动率扩张 σ={garch_vol:.4f} > μ={garch_vol_ma:.4f}")
+        else:
+            base.update(signal='△ 突破但 GARCH 过滤 🚫', signal_type='near_upper',
+                suggested_qty=qty, suggested_stop=stop,
+                risk_usdt=CAPITAL * RISK_PCT,
+                detail=f"价格 {fmt_price(price)} > {LONG_ENTRY}周期高点 {fmt_price(ch_up)}"
+                       f" | 但 GARCH 波动率收缩 σ={garch_vol:.4f} ≤ μ={garch_vol_ma:.4f}"
+                       f" → 不入场")
+    elif price < ch_lo:
+        qty  = (CAPITAL * RISK_PCT) / atr_val
+        stop = price + SHORT_STOP * atr_val
+        if garch_expanding:
+            base.update(signal='★ 做空信号 (GARCH ✅)', signal_type='entry_short',
+                suggested_qty=qty, suggested_stop=stop,
+                risk_usdt=CAPITAL * RISK_PCT,
+                detail=f"价格 {fmt_price(price)} < {SHORT_ENTRY}周期低点 {fmt_price(ch_lo)}"
+                       f" | GARCH 波动率扩张 σ={garch_vol:.4f} > μ={garch_vol_ma:.4f}")
+        else:
+            base.update(signal='▽ 突破但 GARCH 过滤 🚫', signal_type='near_lower',
+                suggested_qty=qty, suggested_stop=stop,
+                risk_usdt=CAPITAL * RISK_PCT,
+                detail=f"价格 {fmt_price(price)} < {SHORT_ENTRY}周期低点 {fmt_price(ch_lo)}"
+                       f" | 但 GARCH 波动率收缩 σ={garch_vol:.4f} ≤ μ={garch_vol_ma:.4f}"
+                       f" → 不入场")
+    else:
+        dist_up = (ch_up - price) / price * 100
+        dist_lo = (price - ch_lo) / price * 100
+        garch_label = '扩张 ✅' if garch_expanding else '收缩 🚫'
+        if dist_up < NEAR_PCT:
+            base.update(signal=f'△ 接近上轨 {dist_up:.1f}%', signal_type='near_upper',
+                detail=f"距多头入场 {fmt_price(ch_up)} 差 {dist_up:.1f}% | GARCH {garch_label}")
+        elif dist_lo < NEAR_PCT:
+            base.update(signal=f'▽ 接近下轨 {dist_lo:.1f}%', signal_type='near_lower',
+                detail=f"距空头入场 {fmt_price(ch_lo)} 差 {dist_lo:.1f}% | GARCH {garch_label}")
+        else:
+            base.update(signal=f'— 观望 | GARCH {garch_label}', signal_type='neutral',
+                detail=f"距上轨 {dist_up:.1f}% / 距下轨 {dist_lo:.1f}% | GARCH {garch_label}")
+
+    return base
+
+
+@st.cache_data(ttl=REFRESH_SECONDS)
+def run_full_scan():
+    """执行完整扫描, 返回 (signals, positions_info, balance, scan_time)."""
+    bars_needed = max(LONG_ENTRY, SHORT_ENTRY, ATR_PERIOD, GARCH_LOOKBACK) + 200
+    start_date  = calc_start_date(TIMEFRAME, bars_needed)
+
+    # 持仓数据
+    positions = {}
+    positions_file = Path(__file__).resolve().parent / 'turtle_positions.json'
+    if positions_file.exists():
+        try:
+            positions = json.load(open(positions_file))
+        except Exception:
+            pass
+
+    okx_pos  = []
+    balance  = None
+
+    if has_auth_config():
+        try:
+            auth_ex  = create_exchange(EXCHANGE_ID, need_auth=True)
+            okx_pos  = fetch_account_positions(auth_ex)
+            balance  = fetch_account_balance(auth_ex)
+            okx_real = {p['symbol']: p for p in okx_pos}
+        except Exception:
+            okx_real = {}
+    else:
+        okx_real = {}
+
+    exchange = create_exchange(EXCHANGE_ID)
+    signals  = []
+
+    progress = st.progress(0, text='拉取数据中...')
+    for i, sym in enumerate(SYMBOLS):
+        coin = short_name(sym)
+        progress.progress((i + 1) / len(SYMBOLS),
+                          text=f'扫描 {coin} ({i+1}/{len(SYMBOLS)})')
+        try:
+            df = fetch_ohlcv(exchange, sym, TIMEFRAME, start_date)
+            if df is None or len(df) < bars_needed // 2:
+                signals.append(dict(name=coin, symbol=sym, price=0,
+                                    signal='数据不足', signal_type='none',
+                                    upper=0, lower=0, atr=0,
+                                    exit_lower=0, exit_upper=0,
+                                    garch_expanding=False, garch_vol=0,
+                                    garch_vol_ma=0,
+                                    df=pd.DataFrame(), atr_series=pd.Series(),
+                                    garch_info=None,
+                                    up_l=pd.Series(), lo_l=pd.Series(),
+                                    lo_s=pd.Series(), up_s=pd.Series()))
+                continue
+
+            # 计算 GARCH
+            garch_info = compute_garch_volatility(df, lookback=GARCH_LOOKBACK)
+
+            # OKX 持仓同步
+            if sym in okx_real and sym not in positions:
+                rp = okx_real[sym]
+                atr_val = compute_atr(df['high'], df['low'],
+                                      df['close'], ATR_PERIOD).iloc[-1]
+                dire = rp['side']
+                stop = (rp['entry_price'] - LONG_STOP * atr_val if dire == 'long'
+                        else rp['entry_price'] + SHORT_STOP * atr_val)
+                positions[sym] = dict(
+                    direction=dire, entry_price=rp['entry_price'],
+                    stop_loss=stop,
+                    quantity=rp['contracts'] * rp['contract_size'],
+                    atr=atr_val, source='okx',
+                )
+
+            signals.append(scan_symbol_garch(df, sym, garch_info, positions))
+        except Exception as e:
+            signals.append(dict(name=coin, symbol=sym, price=0,
+                                signal=f'获取失败: {e}', signal_type='none',
+                                upper=0, lower=0, atr=0,
+                                exit_lower=0, exit_upper=0,
+                                garch_expanding=False, garch_vol=0,
+                                garch_vol_ma=0,
+                                df=pd.DataFrame(), atr_series=pd.Series(),
+                                garch_info=None,
+                                up_l=pd.Series(), lo_l=pd.Series(),
+                                lo_s=pd.Series(), up_s=pd.Series()))
+
+    progress.empty()
+    scan_time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+
+    # Telegram 通知
+    if has_telegram_config():
+        notify_signals(signals)
+
+    return signals, okx_pos, balance, scan_time
+
+
+# ════════════════════════════════════════════════════════════════
+#  图表
+# ════════════════════════════════════════════════════════════════
+
+def plot_kline_garch(signal_data):
+    """K线 + 唐奇安通道 + GARCH 波动率 + ATR 四合一图表."""
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    df = signal_data.get('df')
+    if df is None or df.empty:
+        return None
+
+    up_l = signal_data.get('up_l', pd.Series())
+    lo_s = signal_data.get('lo_s', pd.Series())
+    lo_l = signal_data.get('lo_l', pd.Series())
+    up_s = signal_data.get('up_s', pd.Series())
+    atr_s = signal_data.get('atr_series', pd.Series())
+    garch = signal_data.get('garch_info')
+
+    # 4 行子图: K线 | GARCH 波动率 | ATR | 成交量
+    row_heights = [0.45, 0.2, 0.15, 0.2]
+    fig = make_subplots(rows=4, cols=1, shared_xaxes=True,
+                        row_heights=row_heights,
+                        vertical_spacing=0.02,
+                        subplot_titles=['', 'GARCH 条件波动率', 'ATR', '成交量'])
+
+    # ── Row 1: K 线 + 通道 ──
+    fig.add_trace(go.Candlestick(
+        x=df.index, open=df['open'], high=df['high'],
+        low=df['low'], close=df['close'],
+        name='K线',
+        increasing_line_color='#26a69a',
+        decreasing_line_color='#ef5350',
+    ), row=1, col=1)
+
+    if not up_l.empty:
+        fig.add_trace(go.Scatter(
+            x=df.index, y=up_l, name=f'入场上轨({LONG_ENTRY})',
+            line=dict(color='#2196F3', width=1.5),
+        ), row=1, col=1)
+    if not lo_s.empty:
+        fig.add_trace(go.Scatter(
+            x=df.index, y=lo_s, name=f'入场下轨({SHORT_ENTRY})',
+            line=dict(color='#FF9800', width=1.5),
+        ), row=1, col=1)
+    if not lo_l.empty:
+        fig.add_trace(go.Scatter(
+            x=df.index, y=lo_l, name=f'多出场({LONG_EXIT})',
+            line=dict(color='#2196F3', width=1, dash='dash'),
+        ), row=1, col=1)
+    if not up_s.empty:
+        fig.add_trace(go.Scatter(
+            x=df.index, y=up_s, name=f'空出场({SHORT_EXIT})',
+            line=dict(color='#FF9800', width=1, dash='dash'),
+        ), row=1, col=1)
+
+    # ── Row 2: GARCH 条件波动率 ──
+    if garch:
+        cond_vol = garch['cond_vol']
+        vol_ma = garch['vol_ma']
+        expanding = garch['expanding']
+
+        fig.add_trace(go.Scatter(
+            x=df.index, y=cond_vol, name='σ_t (条件波动率)',
+            line=dict(color='#E040FB', width=1.5),
+        ), row=2, col=1)
+
+        fig.add_trace(go.Scatter(
+            x=df.index, y=vol_ma, name=f'σ̄ (均值 {GARCH_LOOKBACK})',
+            line=dict(color='#FFD740', width=1.2, dash='dash'),
+        ), row=2, col=1)
+
+        # 扩张区域用绿色背景标记
+        # 找出连续的 True 区间
+        expanding_vals = expanding.values
+        in_expanding = False
+        for j in range(len(expanding_vals)):
+            if expanding_vals[j] and not in_expanding:
+                start_idx = j
+                in_expanding = True
+            elif not expanding_vals[j] and in_expanding:
+                fig.add_vrect(
+                    x0=df.index[start_idx], x1=df.index[j-1],
+                    fillcolor='rgba(76, 175, 80, 0.08)',
+                    layer='below', line_width=0,
+                    row=2, col=1,
+                )
+                in_expanding = False
+        if in_expanding:
+            fig.add_vrect(
+                x0=df.index[start_idx], x1=df.index[-1],
+                fillcolor='rgba(76, 175, 80, 0.08)',
+                layer='below', line_width=0,
+                row=2, col=1,
+            )
+
+    # ── Row 3: ATR ──
+    if not atr_s.empty:
+        fig.add_trace(go.Scatter(
+            x=df.index, y=atr_s, name=f'ATR({ATR_PERIOD})',
+            line=dict(color='#00BCD4', width=1.5),
+            fill='tozeroy', fillcolor='rgba(0, 188, 212, 0.1)',
+        ), row=3, col=1)
+
+    # ── Row 4: 成交量 ──
+    if 'volume' in df.columns:
+        colors = ['#26a69a' if c >= o else '#ef5350'
+                  for c, o in zip(df['close'], df['open'])]
+        fig.add_trace(go.Bar(
+            x=df.index, y=df['volume'], name='成交量',
+            marker_color=colors, opacity=0.5,
+        ), row=4, col=1)
+
+    name = signal_data['name']
+    fig.update_layout(
+        title=f'{name}/USDT  {TIMEFRAME}  GARCH 海龟系统',
+        height=850,
+        xaxis_rangeslider_visible=False,
+        template='plotly_dark',
+        legend=dict(orientation='h', yanchor='bottom', y=1.02,
+                    xanchor='right', x=1, font=dict(size=10)),
+        margin=dict(l=50, r=20, t=60, b=20),
+    )
+    fig.update_yaxes(title_text='价格', row=1, col=1)
+    fig.update_yaxes(title_text='σ', row=2, col=1)
+    fig.update_yaxes(title_text='ATR', row=3, col=1)
+    fig.update_yaxes(title_text='Vol', row=4, col=1)
+
+    return fig
+
+
+# ════════════════════════════════════════════════════════════════
+#  Streamlit 页面
+# ════════════════════════════════════════════════════════════════
+
+def signal_color(signal_type):
+    if signal_type.startswith('entry_'):   return '🟢'
+    if signal_type.startswith('exit_'):    return '🔴'
+    if signal_type.startswith('holding_'): return '🔵'
+    if signal_type.startswith('near_'):    return '🟡'
+    return '⚪'
+
+
+def main():
+    st.set_page_config(
+        page_title='GARCH 海龟信号',
+        page_icon='🐢',
+        layout='wide',
+    )
+
+    st.title('🐢 GARCH 海龟交易信号 — BTC & ETH')
+
+    # ── 侧边栏 ──
+    with st.sidebar:
+        st.header('⚙️ 系统参数')
+        st.markdown(f"""
+        **海龟参数**
+        - 周期: {TIMEFRAME}
+        - 入场通道: {LONG_ENTRY} / {SHORT_ENTRY}
+        - 出场通道: {LONG_EXIT} / {SHORT_EXIT}
+        - 止损: {LONG_STOP:.0f}N / {SHORT_STOP:.0f}N
+        - 风险: {RISK_PCT*100:.1f}%
+        - 资金: {CAPITAL:,} USDT
+
+        **GARCH(1,1) 过滤**
+        - 均值窗口: {GARCH_LOOKBACK} 根 K 线
+        - 入场条件: σ_t > σ̄
+        - 原理: 波动率扩张时入场
+        """)
+
+        st.divider()
+        tg_status = '✅ 已配置' if has_telegram_config() else '❌ 未配置'
+        st.markdown(f'**Telegram 通知**: {tg_status}')
+
+        st.divider()
+        if st.button('🔄 立即刷新', use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
+
+        st.caption(f'自动刷新间隔: {REFRESH_SECONDS // 3600} 小时')
+
+    # ── 数据扫描 ──
+    signals, okx_pos, balance, scan_time = run_full_scan()
+
+    # ── 顶部统计 ──
+    st.caption(f'⏱ 扫描时间: {scan_time}')
+
+    # ── 账户余额 ──
+    if balance and balance['total'] > 0:
+        bc1, bc2, bc3 = st.columns(3)
+        bc1.metric('💰 账户总额', f"{balance['total']:,.2f} USDT")
+        bc2.metric('可用', f"{balance['free']:,.2f} USDT")
+        bc3.metric('已用', f"{balance['used']:,.2f} USDT")
+        st.divider()
+
+    # ── 逐币种面板 ──
+    for s in signals:
+        emoji = signal_color(s['signal_type'])
+        garch_badge = '🟢 扩张' if s.get('garch_expanding') else '🔴 收缩'
+
+        st.subheader(f"{emoji} {s['name']}  —  {s['signal']}")
+
+        # 核心指标行
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric('💲 价格', fmt_price(s['price']) if s['price'] > 0 else '—')
+        c2.metric('📊 ATR', fmt_price(s['atr']) if s.get('atr', 0) > 0 else '—')
+        c3.metric('📈 GARCH σ', f"{s.get('garch_vol', 0):.4f}")
+        c4.metric('📉 GARCH σ̄', f"{s.get('garch_vol_ma', 0):.4f}")
+        c5.metric('🔬 GARCH 状态', garch_badge)
+
+        # 通道 + 仓位参数
+        c6, c7, c8, c9 = st.columns(4)
+        c6.metric('⬆ 入场上轨', fmt_price(s['upper']) if s.get('upper', 0) > 0 else '—')
+        c7.metric('⬇ 入场下轨', fmt_price(s['lower']) if s.get('lower', 0) > 0 else '—')
+        c8.metric('🔽 多出场', fmt_price(s.get('exit_lower', 0)) if s.get('exit_lower', 0) > 0 else '—')
+        c9.metric('🔼 空出场', fmt_price(s.get('exit_upper', 0)) if s.get('exit_upper', 0) > 0 else '—')
+
+        # 仓位建议 (入场信号时)
+        if s.get('suggested_qty') and s['suggested_qty'] > 0:
+            val = s['suggested_qty'] * s['price']
+            st.info(
+                f"**仓位**: {s['suggested_qty']:.6f} {s['name']}  "
+                f"(≈ {val:,.0f} USDT)  |  "
+                f"**止损**: {fmt_price(s['suggested_stop'])}  |  "
+                f"**风险**: {s['risk_usdt']:.0f} USDT  |  "
+                f"**R倍数**: {LONG_STOP:.0f}N = {LONG_STOP * s['atr']:.2f}"
+            )
+
+        # GARCH 模型参数
+        garch = s.get('garch_info')
+        if garch:
+            with st.expander(f'🔬 GARCH(1,1) 模型参数 — {s["name"]}'):
+                gc1, gc2, gc3, gc4 = st.columns(4)
+                gc1.metric('α (冲击系数)', f"{garch['alpha']:.4f}")
+                gc2.metric('β (惯性系数)', f"{garch['beta']:.4f}")
+                gc3.metric('ω (基准方差)', f"{garch['omega']:.6f}")
+                gc4.metric('允许入场占比', f"{garch['pct_on']:.1f}%")
+
+                st.caption(
+                    f"σ²_t = {garch['omega']:.6f} + "
+                    f"{garch['alpha']:.4f} × r²_{{t-1}} + "
+                    f"{garch['beta']:.4f} × σ²_{{t-1}}  |  "
+                    f"α+β = {garch['alpha'] + garch['beta']:.4f}  "
+                    f"({'高持续性' if garch['alpha'] + garch['beta'] > 0.95 else '中等持续性'})"
+                )
+
+        # 信号详情
+        if s.get('detail'):
+            st.caption(s['detail'])
+
+        # K 线图
+        fig = plot_kline_garch(s)
+        if fig:
+            st.plotly_chart(fig, use_container_width=True)
+
+        st.divider()
+
+    # ── OKX 实盘持仓 ──
+    if okx_pos:
+        st.subheader('📊 OKX 实盘持仓')
+        for p in okx_pos:
+            with st.expander(
+                f"{'🟢' if p['side']=='long' else '🔴'} "
+                f"{p['name']}  {p['side'].upper()}  ×{p['leverage']:.0f}  "
+                f"{p['unrealized_pnl']:+,.2f} USDT ({p['percentage']:+.2f}%)",
+                expanded=True
+            ):
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric('入场价', fmt_price(p['entry_price']))
+                c2.metric('标记价', fmt_price(p['mark_price']))
+                qty = p['contracts'] * p['contract_size']
+                c3.metric('持仓量', f"{qty:.4f}")
+                c4.metric('保证金', f"{p['margin']:,.2f} USDT")
+
+    # ── 自动刷新 ──
+    time.sleep(REFRESH_SECONDS)
+    st.cache_data.clear()
+    st.rerun()
+
+
+if __name__ == '__main__':
+    main()

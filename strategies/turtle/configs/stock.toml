@@ -1,0 +1,33 @@
+# A股 (只做多, 100 股一手, 印花税, 涨跌停)
+# 运行 (在 quant 根目录): python -m backtest strategies/turtle/configs/stock.toml
+name  = "stock"
+title = "A股回测"
+
+[universe]
+"A股" = ["stock:600519", "stock:000001", "stock:601318", "stock:000858", "stock:300750"]
+
+[data]
+start        = "2015-01-01"
+timeframes   = ["1d"]
+stock_source = "csmar"                # csmar 本地文件 (data/raw/securities) / akshare / csv
+stock_adjust = "hfq"                  # akshare 时: hfq 后复权 (推荐) / qfq
+
+[strategy]
+signal = "donchian:60,20"
+filter = "none"
+
+[portfolio]
+weighting  = "instrument"
+target_vol = 0                        # A股现金账户不能加杠杆
+
+[robustness]
+enabled   = false
+signals   = ["donchian:60,20", "donchian:20,10", "tsmom:252", "ma:50,200"]
+filters   = ["none", "vix:low,80", "vix:high,50"]
+bootstrap = 1000
+cost_multipliers = [0, 1, 2, 4]
+
+[robustness.grid]
+donchian = [[20, 40, 60, 100, 150], [10, 20, 30, 50]]
+tsmom    = [[21, 63, 126, 252, 504]]
+ma       = [[10, 20, 50, 100], [100, 150, 200, 300]]

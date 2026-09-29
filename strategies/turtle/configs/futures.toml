@@ -1,0 +1,45 @@
+# 国内期货: 股指 / 国债 / 商品
+# 运行 (在 quant 根目录): python -m backtest strategies/turtle/configs/futures.toml
+name  = "futures"
+title = "国内期货回测"
+
+[universe]
+"股指" = ["future:IF", "future:IH", "future:IC", "future:IM"]
+"国债" = ["future:T", "future:TF", "future:TS", "future:TL"]
+"商品" = ["future:RB", "future:I", "future:CU", "future:AL", "future:AU", "future:AG", "future:SC",
+        "future:TA", "future:MA", "future:M", "future:Y", "future:CF", "future:SR"]
+
+[data]
+start          = "2015-01-01"
+timeframes     = ["1d"]
+futures_adjust = "diff"
+futures_source = "sina"
+
+[strategy]
+signal = "donchian:60,20"
+filter = "none"                       # 试试 vix:low,80 (默认用中国 QVIX)
+
+[portfolio]
+weighting  = "class"
+target_vol = 0.10
+
+[costs.future]
+initial_capital = 10_000_000
+
+[robustness]
+enabled   = false                     # --robustness 打开
+signals   = ["donchian:60,20", "donchian:20,10", "tsmom:252", "tsmom:126", "ma:50,200",
+             "donchian:20,10 + donchian:60,20 + donchian:120,40 + tsmom:63 + tsmom:126 + tsmom:252"]   # 最后一个: 多周期混合
+filters   = ["none", "garch", "vix:low,80", "vix:high,50"]
+bootstrap = 1000
+cost_multipliers = [0, 1, 2, 4]
+
+[robustness.grid]
+donchian = [[20, 40, 60, 100, 150], [10, 20, 30, 50]]
+tsmom    = [[21, 63, 126, 252, 504]]
+ma       = [[10, 20, 50, 100], [100, 150, 200, 300]]
+
+[overlay]                             # 和沪深300 组合: 这个策略有没有用 (报告第八节)
+enabled  = true
+weights  = [0, 0.1, 0.2, 0.3, 0.5]    # 策略占总资金的比例, 其余买沪深300
+overlays = [0.5, 1.0]                 # 股票 100% 不变, 再叠加几倍策略
