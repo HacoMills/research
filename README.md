@@ -1,5 +1,7 @@
 # Quant Research
 
+**中文** | [English](#english)
+
 跨资产趋势跟踪策略研究 + 一套可复用的分层回测框架（Python）。
 
 在国内股指、国债、商品期货和外汇共 26 个品种上复现并扩展 Moskowitz, Ooi & Pedersen (2012) 的时间序列动量（TSMOM），重点不在"调出一条漂亮曲线"，而在**避免前视偏差、识别过拟合、诚实评估结果**。
@@ -107,3 +109,120 @@ python -m backtest strategies/turtle/configs/cross_asset.toml --signal tsmom:252
 - 外汇未计利差（carry）
 - 各品种独立本金，未模拟共用保证金账户；未计期货换月成本和加密货币资金费率
 - 策略参数和品种池的选择本身存在一定的事后选择
+
+---
+---
+
+<a id="english"></a>
+
+# Quant Research (English)
+
+[中文](#quant-research) | **English**
+
+A cross-asset trend-following research project and a reusable, layered backtesting framework in Python.
+
+It replicates and extends the time-series momentum (TSMOM) study of Moskowitz, Ooi & Pedersen (2012) on 26 instruments across Chinese equity-index futures, government-bond futures, commodity futures and FX. The focus is not on producing a pretty equity curve, but on **avoiding look-ahead bias, detecting overfitting, and evaluating results honestly**.
+
+---
+
+## Key Results
+
+Backtest period Jul 2015 – Sep 2026, daily bars, Donchian channel 60/20. Instruments are equal-weighted within each asset class, classes are equal-weighted, and the portfolio is scaled to 10% annualized volatility.
+
+![Strategy equity curve and drawdown](figures/turtle/cross_asset_portfolio.png)
+
+| | Annual return | Volatility | Sharpe | Max drawdown | Calmar |
+|---|---:|---:|---:|---:|---:|
+| **Trend portfolio** | **+5.9%** | 10.0% | **0.62** | **-13.3%** | 0.44 |
+| Equal-weight buy & hold (same instruments) | +4.3% | 6.4% | 0.68 | -9.4% | 0.45 |
+
+| Asset class | Sharpe | Max drawdown |
+|---|---:|---:|
+| Government bonds | 0.73 | -13.4% |
+| Commodities | 0.53 | -7.5% |
+| Equity indices | 0.31 | -12.5% |
+| FX | -0.18 | -15.0% |
+
+- **Significant alpha**: CAPM alpha versus buy & hold of 0.51% per month (Newey-West t = 2.39), with beta ≈ 0
+- **Crisis alpha**: the squared-market-return term is significant (t = 3.50), i.e. the TSMOM "smile"; +11% during the 2020 COVID shock and +12% during the 2022 rate-hike cycle, while buy & hold lost 9% and 5%
+- **Diversification**: average pairwise correlation across asset classes is 0.02
+- **Statistical significance**: block bootstrap (20-day blocks) 95% confidence interval for the Sharpe ratio is [0.04, 1.20]
+
+### Combined with the CSI 300: what the strategy is good for
+
+![CSI 300 combined with the strategy](figures/turtle/cross_asset_mix_csi300.png)
+
+| Portfolio | Annual return | Sharpe | Max drawdown |
+|---|---:|---:|---:|
+| CSI 300 100% | +0.5% | 0.13 | -45.6% |
+| CSI 300 80% + strategy 20% | +2.0% | 0.20 | -35.7% |
+| CSI 300 70% + strategy 30% | +2.6% | 0.25 | -30.7% |
+| CSI 300 50% + strategy 50% | +3.8% | 0.39 | -20.3% |
+
+The monthly correlation between the strategy and the CSI 300 is -0.01. Adding the strategy raises the Sharpe ratio and cuts the maximum drawdown in half, which is the main value of a trend-following sleeve. (The CSI 300 here is the price index and excludes roughly 2% per year of dividends.)
+
+### Robustness checks
+
+![Parameter grid](figures/turtle/cross_asset_grid.png)
+
+- **Overfitting detection**: the best in-sample (2015–2021) parameter set, 60/10, has a Sharpe of 0.73 in sample but only 0.30 out of sample (2022 onward). A 150-day entry with a 30–50-day exit ranks near the top both in and out of sample; the shorter the exit window, the larger the out-of-sample decay
+- **Cost correction**: a flat 3 bp slippage assumption overstates bond-futures costs by roughly 10x. Modelling slippage in exchange tick sizes raises the portfolio Sharpe from 0.50 to 0.62, and the Sharpe is still 0.48 with slippage quadrupled
+- **Signal comparison**: Donchian, TSMOM and moving-average crossover all have Sharpe ratios of 0.5–0.7 with mutual correlations of 0.5–0.7; a multi-speed blend has an out-of-sample Sharpe of 0.70
+- **Filters**: GARCH and VIX filters both nudge the Sharpe up, but their logic points in opposite directions, so the improvement is more likely noise; neither is used in the final strategy
+- **FX breakdown**: the FX trend portfolio had a Sharpe of 0.62 in 2000–2014 but close to zero after 2015; variance ratios show the non-CNH pairs turning mean-reverting
+
+---
+
+## Backtesting framework
+
+```
+backtest/
+├── markets.py      Layer 1 data interface: "market:symbol" -> bars; per-market rules (fees, tick-size slippage, contract multipliers, price limits)
+├── signals.py      Layer 2 signals: donchian / tsmom / ma / multi-speed blends, switched by a string; custom signals can be plugged in
+├── filters.py      Layer 3 filters: GARCH (rolling re-estimation) / VIX (China QVIX, US VIX lagged one day)
+├── engine.py       Execution: 1% risk / ATR position sizing, gap-aware stops, slippage, bar-by-bar mark-to-market
+├── portfolio.py    Layer 4 portfolio: cross-asset / cross-timeframe, two-level equal weighting, ex-ante volatility targeting
+├── robustness.py   Layer 5 robustness: signal / filter comparison, parameter grid, in- vs out-of-sample, block bootstrap, cost sensitivity
+├── overlay.py      Combination analysis with the CSI 300
+└── report.py       Layer 6 reporting: Markdown + charts
+```
+
+**Biases handled**
+
+- Futures continuous contracts: rolls are decided with the previous close's open interest; signals use adjusted prices while lot sizes, fees and PnL use the actual contract prices at the time
+- Equities: backward-adjusted prices, so future dividends never rewrite history
+- Rolling GARCH re-estimation, time-zone alignment of the VIX, and volatility targeting based on the previous day's estimate are all verified free of look-ahead with truncation tests
+- Bar-by-bar mark-to-market equity (booking PnL only at exit understated the drawdown of a BTC 4h strategy as 12% instead of 24%)
+
+**Usage**
+
+```bash
+pip install -r requirements.txt
+python -m backtest strategies/turtle/configs/cross_asset.toml
+python -m backtest strategies/turtle/configs/cross_asset.toml --signal tsmom:252 --filter vix:low,80
+```
+
+A new strategy only needs one signal class and one config file; see [`backtest/README.md`](backtest/README.md) and [`strategies/_template/`](strategies/_template/) (documentation in Chinese).
+
+Data sources: Sina single-contract futures and Eastmoney FX (via AKShare), CSMAR (A-shares; not included for licensing reasons), OKX (crypto), FRED (VIX).
+
+---
+
+## Repository layout
+
+| Path | Contents |
+|---|---|
+| `backtest/` | Layered backtesting framework |
+| `data/` | Data download, caching and price adjustment |
+| `strategies/turtle/` | Trend strategy: backtest configs, live signals, dashboard |
+| `strategies/_template/` | Template for new strategies |
+| `strategies/15min_garch/` | BTC 15-minute GARCH + XGBoost direction forecasting (conclusion: no directional alpha) |
+| `strategies/ff3/` | Fama-French three-factor model on A-shares |
+| `reports/`, `figures/` | Backtest reports and charts |
+
+## Limitations
+
+- Chinese futures data only starts in 2018 (the expired contracts Sina keeps), about 8 years of history
+- FX returns exclude carry
+- Each instrument has its own capital; a shared margin account is not modelled, nor are futures roll costs or crypto funding rates
+- The choice of parameters and instrument universe itself involves some degree of hindsight
