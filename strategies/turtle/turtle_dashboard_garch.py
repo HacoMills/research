@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
 ═══════════════════════════════════════════════════════════════
-  海龟交易系统 — GARCH 版 Streamlit 仪表盘
+  海龟交易系统 — Streamlit 仪表盘
 
-  只监控 BTC 和 ETH, 集成 GARCH(1,1) 波动率过滤:
+  侧边栏可以选: 币种、K线周期、入场/出场通道天数、止损倍数、资金和风险、是否启用 GARCH 过滤.
+  通道和 ATR 按"天"设置, 自动换算成 K线根数, 与回测框架 (python -m backtest) 一致:
+    4h 周期的 60 天 = 360 根K线; 1h 周期的 60 天 = 1440 根.
     1. 信号总览 (入场/出场 + GARCH 过滤状态)
     2. GARCH 条件波动率曲线 + 波动率扩张/收缩标记
     3. K线图 + 唐奇安通道 + ATR
@@ -44,25 +46,41 @@ from data.fetch_data import (
 #  参数
 # ════════════════════════════════════════════════════════════════
 
-# 只监控 BTC 和 ETH
-SYMBOLS = ['BTC/USDT:USDT', 'ETH/USDT:USDT']
+# 侧边栏里可选的币 (也可以在侧边栏手动输入其他币)
+COIN_CHOICES = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'ADA', 'AVAX', 'LINK', 'DOT', 'LTC',
+                'BCH', 'TRX', 'UNI', 'ATOM', 'NEAR', 'SUI', 'BNB', 'FIL', 'ETC', 'OP', 'ARB']
+DEFAULT_COINS = ['BTC', 'ETH']
 
-# 海龟参数 (System2: 60/20, 回测结论更稳)
-LONG_ENTRY  = 60
-LONG_EXIT   = 20
-SHORT_ENTRY = 60
-SHORT_EXIT  = 20
-LONG_STOP   = 2.0
-SHORT_STOP  = 2.0
-ATR_PERIOD  = 20
-RISK_PCT    = 0.01
-CAPITAL     = 10000
-TIMEFRAME   = '4h'
+# 周期 → 每天K线根数 (加密货币 24 小时交易)
+TF_BARS_PER_DAY = {'15m': 96, '30m': 48, '1h': 24, '4h': 6, '1d': 1}
+
+# 默认参数 (单位: 天; 与回测框架的 donchian:60,20 一致)
+DEFAULT_TF          = '4h'
+DEFAULT_ENTRY_DAYS  = 60
+DEFAULT_EXIT_DAYS   = 20
+DEFAULT_STOP        = 2.0
+DEFAULT_CAPITAL     = 10000
+DEFAULT_RISK_PCT    = 0.01
+ATR_DAYS            = 20      # ATR 周期 (天)
+GARCH_DAYS          = 20      # GARCH 波动率均值窗口 (天)
 EXCHANGE_ID = 'okx'
 NEAR_PCT    = 2.0
 
-# GARCH 参数
-GARCH_LOOKBACK = 120   # GARCH 滚动均值窗口 (4h K线, ≈20天)
+
+def make_cfg(symbols, tf, entry_days, exit_days, stop, capital, risk_pct, use_garch):
+    """侧边栏参数 → 运行配置 (天数换算成K线根数)."""
+    bpd = TF_BARS_PER_DAY[tf]
+    return dict(
+        symbols=list(symbols), tf=tf, use_garch=use_garch,
+        entry_days=entry_days, exit_days=exit_days,
+        entry=max(int(entry_days * bpd), 2), exit=max(int(exit_days * bpd), 2),
+        atr=max(int(ATR_DAYS * bpd), 14), garch_lookback=max(int(GARCH_DAYS * bpd), 20),
+        stop=stop, capital=capital, risk_pct=risk_pct,
+    )
+
+
+CFG = make_cfg(['BTC/USDT:USDT', 'ETH/USDT:USDT'], DEFAULT_TF, DEFAULT_ENTRY_DAYS,
+               DEFAULT_EXIT_DAYS, DEFAULT_STOP, DEFAULT_CAPITAL, DEFAULT_RISK_PCT, False)
 
 REFRESH_SECONDS = 4 * 3600   # 4 小时自动刷新
 
@@ -102,7 +120,7 @@ def fmt_price(p):
 #  GARCH(1,1) 波动率过滤器
 # ════════════════════════════════════════════════════════════════
 
-def compute_garch_volatility(df, lookback=GARCH_LOOKBACK):
+def compute_garch_volatility(df, lookback=120):
     """
     计算 GARCH(1,1) 条件波动率和过滤信号.
 
@@ -252,13 +270,15 @@ def notify_signals(signals):
 # ════════════════════════════════════════════════════════════════
 
 def scan_symbol_garch(df, symbol, garch_info, positions):
-    """扫描单个品种 (含 GARCH), 返回信号字典."""
+    """扫描单个品种, 返回信号字典. CFG['use_garch'] 为 False 时突破直接算入场."""
     name = short_name(symbol)
-    atr_s  = compute_atr(df['high'], df['low'], df['close'], ATR_PERIOD)
-    up_l   = df['high'].rolling(LONG_ENTRY).max().shift(1)
-    lo_l   = df['low'].rolling(LONG_EXIT).min().shift(1)
-    lo_s   = df['low'].rolling(SHORT_ENTRY).min().shift(1)
-    up_s   = df['high'].rolling(SHORT_EXIT).max().shift(1)
+    E, X, use_garch = CFG['entry'], CFG['exit'], CFG['use_garch']
+    CAPITAL, RISK_PCT, STOP = CFG['capital'], CFG['risk_pct'], CFG['stop']
+    atr_s  = compute_atr(df['high'], df['low'], df['close'], CFG['atr'])
+    up_l   = df['high'].rolling(E).max().shift(1)
+    lo_l   = df['low'].rolling(X).min().shift(1)
+    lo_s   = df['low'].rolling(E).min().shift(1)
+    up_s   = df['high'].rolling(X).max().shift(1)
 
     price    = df['close'].iloc[-1]
     atr_val  = atr_s.iloc[-1]
@@ -307,7 +327,7 @@ def scan_symbol_garch(df, symbol, garch_info, positions):
                     detail=f"价格 {fmt_price(price)} ≤ 止损 {fmt_price(pos['stop_loss'])}")
             elif price < exit_lo:
                 base.update(signal='◀ 多头出场', signal_type='exit_channel',
-                    detail=f"价格 {fmt_price(price)} < {LONG_EXIT}周期低点 {fmt_price(exit_lo)}")
+                    detail=f"价格 {fmt_price(price)} < {CFG['exit_days']}天低点 {fmt_price(exit_lo)}")
             else:
                 pnl = pos['quantity'] * (price - pos['entry_price'])
                 pct = (price / pos['entry_price'] - 1) * 100
@@ -323,7 +343,7 @@ def scan_symbol_garch(df, symbol, garch_info, positions):
                     detail=f"价格 {fmt_price(price)} ≥ 止损 {fmt_price(pos['stop_loss'])}")
             elif price > exit_up:
                 base.update(signal='◀ 空头出场', signal_type='exit_channel',
-                    detail=f"价格 {fmt_price(price)} > {SHORT_EXIT}周期高点 {fmt_price(exit_up)}")
+                    detail=f"价格 {fmt_price(price)} > {CFG['exit_days']}天高点 {fmt_price(exit_up)}")
             else:
                 pnl = pos['quantity'] * (pos['entry_price'] - price)
                 pct = (pos['entry_price'] / price - 1) * 100
@@ -336,42 +356,36 @@ def scan_symbol_garch(df, symbol, garch_info, positions):
         return base
 
     # ── 空仓: 检查入场信号 ──
+    garch_ok = garch_expanding or not use_garch          # 不启用 GARCH 时不过滤
+    garch_txt = (f" | GARCH 扩张 σ={garch_vol:.4f} > μ={garch_vol_ma:.4f}" if use_garch else "")
     if price > ch_up:
         qty  = (CAPITAL * RISK_PCT) / atr_val
-        stop = price - LONG_STOP * atr_val
-        if garch_expanding:
-            base.update(signal='★ 做多信号 (GARCH ✅)', signal_type='entry_long',
-                suggested_qty=qty, suggested_stop=stop,
-                risk_usdt=CAPITAL * RISK_PCT,
-                detail=f"价格 {fmt_price(price)} > {LONG_ENTRY}周期高点 {fmt_price(ch_up)}"
-                       f" | GARCH 波动率扩张 σ={garch_vol:.4f} > μ={garch_vol_ma:.4f}")
+        stop = price - STOP * atr_val
+        brk = f"价格 {fmt_price(price)} > {CFG['entry_days']}天高点 {fmt_price(ch_up)}"
+        if garch_ok:
+            base.update(signal='★ 做多信号' + (' (GARCH ✅)' if use_garch else ''),
+                signal_type='entry_long', suggested_qty=qty, suggested_stop=stop,
+                risk_usdt=CAPITAL * RISK_PCT, detail=brk + garch_txt)
         else:
             base.update(signal='△ 突破但 GARCH 过滤 🚫', signal_type='near_upper',
-                suggested_qty=qty, suggested_stop=stop,
-                risk_usdt=CAPITAL * RISK_PCT,
-                detail=f"价格 {fmt_price(price)} > {LONG_ENTRY}周期高点 {fmt_price(ch_up)}"
-                       f" | 但 GARCH 波动率收缩 σ={garch_vol:.4f} ≤ μ={garch_vol_ma:.4f}"
-                       f" → 不入场")
+                suggested_qty=qty, suggested_stop=stop, risk_usdt=CAPITAL * RISK_PCT,
+                detail=brk + f" | 但 GARCH 收缩 σ={garch_vol:.4f} ≤ μ={garch_vol_ma:.4f} → 不入场")
     elif price < ch_lo:
         qty  = (CAPITAL * RISK_PCT) / atr_val
-        stop = price + SHORT_STOP * atr_val
-        if garch_expanding:
-            base.update(signal='★ 做空信号 (GARCH ✅)', signal_type='entry_short',
-                suggested_qty=qty, suggested_stop=stop,
-                risk_usdt=CAPITAL * RISK_PCT,
-                detail=f"价格 {fmt_price(price)} < {SHORT_ENTRY}周期低点 {fmt_price(ch_lo)}"
-                       f" | GARCH 波动率扩张 σ={garch_vol:.4f} > μ={garch_vol_ma:.4f}")
+        stop = price + STOP * atr_val
+        brk = f"价格 {fmt_price(price)} < {CFG['entry_days']}天低点 {fmt_price(ch_lo)}"
+        if garch_ok:
+            base.update(signal='★ 做空信号' + (' (GARCH ✅)' if use_garch else ''),
+                signal_type='entry_short', suggested_qty=qty, suggested_stop=stop,
+                risk_usdt=CAPITAL * RISK_PCT, detail=brk + garch_txt)
         else:
             base.update(signal='▽ 突破但 GARCH 过滤 🚫', signal_type='near_lower',
-                suggested_qty=qty, suggested_stop=stop,
-                risk_usdt=CAPITAL * RISK_PCT,
-                detail=f"价格 {fmt_price(price)} < {SHORT_ENTRY}周期低点 {fmt_price(ch_lo)}"
-                       f" | 但 GARCH 波动率收缩 σ={garch_vol:.4f} ≤ μ={garch_vol_ma:.4f}"
-                       f" → 不入场")
+                suggested_qty=qty, suggested_stop=stop, risk_usdt=CAPITAL * RISK_PCT,
+                detail=brk + f" | 但 GARCH 收缩 σ={garch_vol:.4f} ≤ μ={garch_vol_ma:.4f} → 不入场")
     else:
         dist_up = (ch_up - price) / price * 100
         dist_lo = (price - ch_lo) / price * 100
-        garch_label = '扩张 ✅' if garch_expanding else '收缩 🚫'
+        garch_label = ('扩张 ✅' if garch_expanding else '收缩 🚫') if use_garch else '未启用'
         if dist_up < NEAR_PCT:
             base.update(signal=f'△ 接近上轨 {dist_up:.1f}%', signal_type='near_upper',
                 detail=f"距多头入场 {fmt_price(ch_up)} 差 {dist_up:.1f}% | GARCH {garch_label}")
@@ -385,10 +399,15 @@ def scan_symbol_garch(df, symbol, garch_info, positions):
     return base
 
 
-@st.cache_data(ttl=REFRESH_SECONDS)
-def run_full_scan():
-    """执行完整扫描, 返回 (signals, positions_info, balance, scan_time)."""
-    bars_needed = max(LONG_ENTRY, SHORT_ENTRY, ATR_PERIOD, GARCH_LOOKBACK) + 200
+@st.cache_data(ttl=REFRESH_SECONDS, show_spinner=False)
+def run_full_scan(symbols, tf, entry_days, exit_days, stop, capital, risk_pct, use_garch):
+    """执行完整扫描, 返回 (signals, positions_info, balance, scan_time). 参数变了会重新扫描."""
+    global CFG
+    CFG = make_cfg(symbols, tf, entry_days, exit_days, stop, capital, risk_pct, use_garch)
+    SYMBOLS, TIMEFRAME = CFG['symbols'], tf
+    LONG_STOP = SHORT_STOP = stop
+    ATR_PERIOD = CFG['atr']
+    bars_needed = max(CFG['entry'], CFG['exit'], CFG['atr'], CFG['garch_lookback']) + 200
     start_date  = calc_start_date(TIMEFRAME, bars_needed)
 
     # 持仓数据
@@ -437,8 +456,8 @@ def run_full_scan():
                                     lo_s=pd.Series(), up_s=pd.Series()))
                 continue
 
-            # 计算 GARCH
-            garch_info = compute_garch_volatility(df, lookback=GARCH_LOOKBACK)
+            # 计算 GARCH (只在启用时)
+            garch_info = compute_garch_volatility(df, lookback=CFG['garch_lookback']) if use_garch else None
 
             # OKX 持仓同步
             if sym in okx_real and sym not in positions:
@@ -499,11 +518,15 @@ def plot_kline_garch(signal_data):
     garch = signal_data.get('garch_info')
 
     # 4 行子图: K线 | GARCH 波动率 | ATR | 成交量
-    row_heights = [0.45, 0.2, 0.15, 0.2]
-    fig = make_subplots(rows=4, cols=1, shared_xaxes=True,
+    if garch:
+        nrows, row_heights, titles = 4, [0.45, 0.2, 0.15, 0.2], ['', 'GARCH 条件波动率', 'ATR', '成交量']
+    else:                                          # 未启用 GARCH: 不画波动率子图
+        nrows, row_heights, titles = 3, [0.6, 0.18, 0.22], ['', 'ATR', '成交量']
+    r_atr, r_vol = (3, 4) if garch else (2, 3)
+    fig = make_subplots(rows=nrows, cols=1, shared_xaxes=True,
                         row_heights=row_heights,
                         vertical_spacing=0.02,
-                        subplot_titles=['', 'GARCH 条件波动率', 'ATR', '成交量'])
+                        subplot_titles=titles)
 
     # ── Row 1: K 线 + 通道 ──
     fig.add_trace(go.Candlestick(
@@ -516,22 +539,22 @@ def plot_kline_garch(signal_data):
 
     if not up_l.empty:
         fig.add_trace(go.Scatter(
-            x=df.index, y=up_l, name=f'入场上轨({LONG_ENTRY})',
+            x=df.index, y=up_l, name=f"入场上轨({CFG['entry_days']}天)",
             line=dict(color='#2196F3', width=1.5),
         ), row=1, col=1)
     if not lo_s.empty:
         fig.add_trace(go.Scatter(
-            x=df.index, y=lo_s, name=f'入场下轨({SHORT_ENTRY})',
+            x=df.index, y=lo_s, name=f"入场下轨({CFG['entry_days']}天)",
             line=dict(color='#FF9800', width=1.5),
         ), row=1, col=1)
     if not lo_l.empty:
         fig.add_trace(go.Scatter(
-            x=df.index, y=lo_l, name=f'多出场({LONG_EXIT})',
+            x=df.index, y=lo_l, name=f"多出场({CFG['exit_days']}天)",
             line=dict(color='#2196F3', width=1, dash='dash'),
         ), row=1, col=1)
     if not up_s.empty:
         fig.add_trace(go.Scatter(
-            x=df.index, y=up_s, name=f'空出场({SHORT_EXIT})',
+            x=df.index, y=up_s, name=f"空出场({CFG['exit_days']}天)",
             line=dict(color='#FF9800', width=1, dash='dash'),
         ), row=1, col=1)
 
@@ -547,41 +570,23 @@ def plot_kline_garch(signal_data):
         ), row=2, col=1)
 
         fig.add_trace(go.Scatter(
-            x=df.index, y=vol_ma, name=f'σ̄ (均值 {GARCH_LOOKBACK})',
+            x=df.index, y=vol_ma, name=f'σ̄ (均值 {GARCH_DAYS}天)',
             line=dict(color='#FFD740', width=1.2, dash='dash'),
         ), row=2, col=1)
 
-        # 扩张区域用绿色背景标记
-        # 找出连续的 True 区间
-        expanding_vals = expanding.values
-        in_expanding = False
-        for j in range(len(expanding_vals)):
-            if expanding_vals[j] and not in_expanding:
-                start_idx = j
-                in_expanding = True
-            elif not expanding_vals[j] and in_expanding:
-                fig.add_vrect(
-                    x0=df.index[start_idx], x1=df.index[j-1],
-                    fillcolor='rgba(76, 175, 80, 0.08)',
-                    layer='below', line_width=0,
-                    row=2, col=1,
-                )
-                in_expanding = False
-        if in_expanding:
-            fig.add_vrect(
-                x0=df.index[start_idx], x1=df.index[-1],
-                fillcolor='rgba(76, 175, 80, 0.08)',
-                layer='below', line_width=0,
-                row=2, col=1,
-            )
+        # 扩张区间: 用填充面积标出 (逐段 add_vrect 在短周期上会非常慢)
+        fig.add_trace(go.Scatter(
+            x=df.index, y=cond_vol.where(expanding), name='扩张 (允许入场)',
+            mode='none', fill='tozeroy', fillcolor='rgba(76, 175, 80, 0.18)',
+        ), row=2, col=1)
 
     # ── Row 3: ATR ──
     if not atr_s.empty:
         fig.add_trace(go.Scatter(
-            x=df.index, y=atr_s, name=f'ATR({ATR_PERIOD})',
+            x=df.index, y=atr_s, name=f'ATR({ATR_DAYS}天)',
             line=dict(color='#00BCD4', width=1.5),
             fill='tozeroy', fillcolor='rgba(0, 188, 212, 0.1)',
-        ), row=3, col=1)
+        ), row=r_atr, col=1)
 
     # ── Row 4: 成交量 ──
     if 'volume' in df.columns:
@@ -590,11 +595,12 @@ def plot_kline_garch(signal_data):
         fig.add_trace(go.Bar(
             x=df.index, y=df['volume'], name='成交量',
             marker_color=colors, opacity=0.5,
-        ), row=4, col=1)
+        ), row=r_vol, col=1)
 
     name = signal_data['name']
     fig.update_layout(
-        title=f'{name}/USDT  {TIMEFRAME}  GARCH 海龟系统',
+        title=f"{name}/USDT  {CFG['tf']}  唐奇安 {CFG['entry_days']}/{CFG['exit_days']} 天"
+              + ('  + GARCH 过滤' if CFG['use_garch'] else ''),
         height=850,
         xaxis_rangeslider_visible=False,
         template='plotly_dark',
@@ -603,9 +609,10 @@ def plot_kline_garch(signal_data):
         margin=dict(l=50, r=20, t=60, b=20),
     )
     fig.update_yaxes(title_text='价格', row=1, col=1)
-    fig.update_yaxes(title_text='σ', row=2, col=1)
-    fig.update_yaxes(title_text='ATR', row=3, col=1)
-    fig.update_yaxes(title_text='Vol', row=4, col=1)
+    if garch:
+        fig.update_yaxes(title_text='σ', row=2, col=1)
+    fig.update_yaxes(title_text='ATR', row=r_atr, col=1)
+    fig.update_yaxes(title_text='Vol', row=r_vol, col=1)
 
     return fig
 
@@ -624,44 +631,60 @@ def signal_color(signal_type):
 
 def main():
     st.set_page_config(
-        page_title='GARCH 海龟信号',
+        page_title='海龟信号',
         page_icon='🐢',
         layout='wide',
     )
 
-    st.title('🐢 GARCH 海龟交易信号 — BTC & ETH')
+    st.title('🐢 海龟交易信号')
 
-    # ── 侧边栏 ──
+    # ── 侧边栏: 参数 ──
     with st.sidebar:
-        st.header('⚙️ 系统参数')
-        st.markdown(f"""
-        **海龟参数**
-        - 周期: {TIMEFRAME}
-        - 入场通道: {LONG_ENTRY} / {SHORT_ENTRY}
-        - 出场通道: {LONG_EXIT} / {SHORT_EXIT}
-        - 止损: {LONG_STOP:.0f}N / {SHORT_STOP:.0f}N
-        - 风险: {RISK_PCT*100:.1f}%
-        - 资金: {CAPITAL:,} USDT
+        st.header('⚙️ 参数')
+        coins = st.multiselect('币种', COIN_CHOICES, default=DEFAULT_COINS, key='coins')
+        extra = st.text_input('其他币 (逗号分隔, 如 PEPE,WIF)', key='extra_coins')
+        coins = list(dict.fromkeys(coins + [c.strip().upper() for c in extra.split(',') if c.strip()]))
+        tf = st.selectbox('K线周期', list(TF_BARS_PER_DAY), index=list(TF_BARS_PER_DAY).index(DEFAULT_TF), key='tf')
 
-        **GARCH(1,1) 过滤**
-        - 均值窗口: {GARCH_LOOKBACK} 根 K 线
-        - 入场条件: σ_t > σ̄
-        - 原理: 波动率扩张时入场
-        """)
+        c1, c2 = st.columns(2)
+        entry_days = c1.number_input('入场通道 (天)', 5, 300, DEFAULT_ENTRY_DAYS, step=5, key='entry_days')
+        exit_days = c2.number_input('出场通道 (天)', 2, 200, DEFAULT_EXIT_DAYS, step=5, key='exit_days')
+        stop = st.number_input('止损 (几倍 ATR)', 0.5, 10.0, DEFAULT_STOP, step=0.5, key='stop')
+        c3, c4 = st.columns(2)
+        capital = c3.number_input('资金 (USDT)', 100, 10_000_000, DEFAULT_CAPITAL, step=1000, key='capital')
+        risk_pct = c4.number_input('每笔风险 %', 0.1, 5.0, DEFAULT_RISK_PCT * 100, step=0.1, key='risk') / 100
+
+        use_garch = st.toggle('启用 GARCH 过滤', value=False, key='use_garch',
+                              help='开启后, 只在 GARCH 条件波动率高于过去 20 天均值时才提示入场. '
+                                   '回测检验中 GARCH 过滤没有稳定改善结果, 默认关闭.')
+
+        bpd = TF_BARS_PER_DAY[tf]
+        st.caption(f"{tf} 周期: 入场 {entry_days} 天 = {int(entry_days * bpd)} 根K线, "
+                   f"出场 {exit_days} 天 = {int(exit_days * bpd)} 根; ATR {ATR_DAYS} 天")
+        if bpd >= 48 and entry_days >= 60:
+            st.caption('⏳ 短周期 + 长通道需要拉取几千根K线, 第一次会慢一些')
 
         st.divider()
-        tg_status = '✅ 已配置' if has_telegram_config() else '❌ 未配置'
+        tg_status = '✅ 已配置' if has_telegram_config() else '未配置 (不推送)'
         st.markdown(f'**Telegram 通知**: {tg_status}')
 
-        st.divider()
         if st.button('🔄 立即刷新', use_container_width=True):
             st.cache_data.clear()
             st.rerun()
-
         st.caption(f'自动刷新间隔: {REFRESH_SECONDS // 3600} 小时')
 
+    if not coins:
+        st.info('在左侧选择至少一个币种')
+        return
+    symbols = tuple(f'{c}/USDT:USDT' for c in coins)
+    global CFG
+    CFG = make_cfg(symbols, tf, entry_days, exit_days, stop, capital, risk_pct, use_garch)
+
     # ── 数据扫描 ──
-    signals, okx_pos, balance, scan_time = run_full_scan()
+    with st.spinner('拉取行情、计算信号...'):
+        signals, okx_pos, balance, scan_time = run_full_scan(
+            symbols, tf, int(entry_days), int(exit_days), float(stop), float(capital), float(risk_pct), use_garch)
+    CFG = make_cfg(symbols, tf, entry_days, exit_days, stop, capital, risk_pct, use_garch)
 
     # ── 顶部统计 ──
     st.caption(f'⏱ 扫描时间: {scan_time}')
@@ -677,17 +700,20 @@ def main():
     # ── 逐币种面板 ──
     for s in signals:
         emoji = signal_color(s['signal_type'])
-        garch_badge = '🟢 扩张' if s.get('garch_expanding') else '🔴 收缩'
+        garch_badge = ('🟢 扩张' if s.get('garch_expanding') else '🔴 收缩') if CFG['use_garch'] else '— 未启用'
 
         st.subheader(f"{emoji} {s['name']}  —  {s['signal']}")
 
         # 核心指标行
-        c1, c2, c3, c4, c5 = st.columns(5)
+        if CFG['use_garch']:
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c3.metric('📈 GARCH σ', f"{s.get('garch_vol', 0):.4f}")
+            c4.metric('📉 GARCH σ̄', f"{s.get('garch_vol_ma', 0):.4f}")
+            c5.metric('🔬 GARCH 状态', garch_badge)
+        else:
+            c1, c2 = st.columns(2)
         c1.metric('💲 价格', fmt_price(s['price']) if s['price'] > 0 else '—')
         c2.metric('📊 ATR', fmt_price(s['atr']) if s.get('atr', 0) > 0 else '—')
-        c3.metric('📈 GARCH σ', f"{s.get('garch_vol', 0):.4f}")
-        c4.metric('📉 GARCH σ̄', f"{s.get('garch_vol_ma', 0):.4f}")
-        c5.metric('🔬 GARCH 状态', garch_badge)
 
         # 通道 + 仓位参数
         c6, c7, c8, c9 = st.columns(4)
@@ -704,7 +730,7 @@ def main():
                 f"(≈ {val:,.0f} USDT)  |  "
                 f"**止损**: {fmt_price(s['suggested_stop'])}  |  "
                 f"**风险**: {s['risk_usdt']:.0f} USDT  |  "
-                f"**R倍数**: {LONG_STOP:.0f}N = {LONG_STOP * s['atr']:.2f}"
+                f"**止损距离**: {CFG['stop']:g}N = {CFG['stop'] * s['atr']:.2f}"
             )
 
         # GARCH 模型参数
@@ -753,8 +779,11 @@ def main():
                 c3.metric('持仓量', f"{qty:.4f}")
                 c4.metric('保证金', f"{p['margin']:,.2f} USDT")
 
-    # ── 自动刷新 ──
-    time.sleep(REFRESH_SECONDS)
+    # ── 自动刷新 (倒计时期间改侧边栏参数会立即重新运行) ──
+    countdown = st.empty()
+    for remaining in range(REFRESH_SECONDS, 0, -2):
+        countdown.caption(f'⏱ {remaining // 60} 分钟后自动刷新')
+        time.sleep(2)
     st.cache_data.clear()
     st.rerun()
 
