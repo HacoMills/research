@@ -48,7 +48,7 @@ from data.fetch_data import (
 
 # 侧边栏里可选的币 (也可以在侧边栏手动输入其他币)
 COIN_CHOICES = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'ADA', 'AVAX', 'LINK', 'DOT', 'LTC',
-                'BCH', 'TRX', 'UNI', 'ATOM', 'NEAR', 'SUI', 'BNB', 'FIL', 'ETC', 'OP', 'ARB']
+                'BCH', 'TRX', 'UNI', 'ATOM', 'NEAR', 'SUI', 'BNB', 'FIL', 'ETC', 'OP', 'ARB', 'ZEC']
 DEFAULT_COINS = ['BTC', 'ETH']
 
 # 周期 → 每天K线根数 (加密货币 24 小时交易)
