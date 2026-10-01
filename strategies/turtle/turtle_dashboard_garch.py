@@ -11,7 +11,7 @@
     3. K线图 + 唐奇安通道 + ATR
     4. 仓位计算 (unit_size, 止损价, 风险金额)
     5. Telegram 通知 (可选)
-    6. 每 4 小时自动刷新
+    6. 自动刷新 (侧边栏选 30 秒 / 1 分钟 / 5 分钟): 只拉最新几根K线, 不重新下载历史
 
   使用:
     streamlit run turtle_dashboard_garch.py
@@ -82,7 +82,9 @@ def make_cfg(symbols, tf, entry_days, exit_days, stop, capital, risk_pct, use_ga
 CFG = make_cfg(['BTC/USDT:USDT', 'ETH/USDT:USDT'], DEFAULT_TF, DEFAULT_ENTRY_DAYS,
                DEFAULT_EXIT_DAYS, DEFAULT_STOP, DEFAULT_CAPITAL, DEFAULT_RISK_PCT, False)
 
-REFRESH_SECONDS = 4 * 3600   # 4 小时自动刷新
+REFRESH_CHOICES = {'30 秒': 30, '1 分钟': 60, '5 分钟': 300, '关闭': 0}
+DEFAULT_REFRESH = '1 分钟'
+CHART_BARS = 400              # K线图只画最近多少根 (画太多会拖慢页面)
 
 TF_MINUTES = {'1m':1, '5m':5, '15m':15, '30m':30, '1h':60,
               '2h':120, '4h':240, '6h':360, '8h':480, '12h':720,
@@ -239,10 +241,21 @@ def has_telegram_config():
     return bool(cfg.get('telegram_token') and cfg.get('telegram_chat_id'))
 
 
+@st.cache_resource
+def _notified():
+    """已推送过的信号 {(币种, 周期): 信号类型}, 避免每次刷新重复推送."""
+    return {}
+
+
 def notify_signals(signals):
-    """有重要信号时推送 Telegram."""
-    important = [s for s in signals
-                 if s['signal_type'].startswith(('entry_', 'exit_'))]
+    """出现新的入场/出场信号时推送 Telegram (同一个信号只推一次)."""
+    sent = _notified()
+    important = []
+    for s in signals:
+        key = (s['symbol'], CFG['tf'])
+        if s['signal_type'].startswith(('entry_', 'exit_')) and sent.get(key) != s['signal_type']:
+            important.append(s)
+        sent[key] = s['signal_type']
     if not important:
         return
 
@@ -399,18 +412,66 @@ def scan_symbol_garch(df, symbol, garch_info, positions):
     return base
 
 
-@st.cache_data(ttl=REFRESH_SECONDS, show_spinner=False)
-def run_full_scan(symbols, tf, entry_days, exit_days, stop, capital, risk_pct, use_garch):
-    """执行完整扫描, 返回 (signals, positions_info, balance, scan_time). 参数变了会重新扫描."""
-    global CFG
-    CFG = make_cfg(symbols, tf, entry_days, exit_days, stop, capital, risk_pct, use_garch)
-    SYMBOLS, TIMEFRAME = CFG['symbols'], tf
-    LONG_STOP = SHORT_STOP = stop
-    ATR_PERIOD = CFG['atr']
-    bars_needed = max(CFG['entry'], CFG['exit'], CFG['atr'], CFG['garch_lookback']) + 200
-    start_date  = calc_start_date(TIMEFRAME, bars_needed)
+@st.cache_resource(show_spinner=False)
+def get_exchange(auth=False):
+    """交易所连接只建一次 (加载市场信息要几秒, 每次刷新都重建会很慢)."""
+    ex = create_exchange(EXCHANGE_ID, need_auth=auth)
+    try:
+        ex.load_markets()
+    except Exception:
+        pass
+    return ex
 
-    # 持仓数据
+
+@st.cache_resource
+def _bar_store():
+    """内存里的K线缓存 {(币种, 周期): DataFrame}; 刷新时只拉最新几根."""
+    return {}
+
+
+def get_bars(symbol, tf, bars_needed):
+    """第一次全量拉取, 之后只从最后一根K线开始拉 (覆盖未收盘的那根)."""
+    store, key = _bar_store(), (symbol, tf)
+    ex = get_exchange()
+    old = store.get(key)
+    if old is not None and len(old) >= bars_needed:
+        since_ms = int(old.index[-1].timestamp() * 1000)
+        new = fetch_ohlcv(ex, symbol, tf, since_ms=since_ms)
+        df = old if new is None or new.empty else \
+            pd.concat([old, new])[lambda d: ~d.index.duplicated(keep='last')].sort_index()
+    else:
+        df = fetch_ohlcv(ex, symbol, tf, calc_start_date(tf, bars_needed))
+    if df is not None and not df.empty:
+        df = df.iloc[-(bars_needed + 50):]
+        store[key] = df
+    return df
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_account():
+    """OKX 持仓和余额 (需要 API Key), 1 分钟内不重复请求."""
+    if not has_auth_config():
+        return [], None
+    try:
+        ex = get_exchange(auth=True)
+        return fetch_account_positions(ex), fetch_account_balance(ex)
+    except Exception:
+        return [], None
+
+
+def _empty_signal(coin, sym, msg):
+    return dict(name=coin, symbol=sym, price=0, signal=msg, signal_type='none',
+                upper=0, lower=0, atr=0, exit_lower=0, exit_upper=0,
+                garch_expanding=False, garch_vol=0, garch_vol_ma=0,
+                df=pd.DataFrame(), atr_series=pd.Series(), garch_info=None,
+                up_l=pd.Series(), lo_l=pd.Series(), lo_s=pd.Series(), up_s=pd.Series())
+
+
+def run_full_scan():
+    """按当前 CFG 扫描全部币种, 返回 (signals, okx持仓, 余额, 扫描时间)."""
+    bars_needed = max(CFG['entry'], CFG['exit'], CFG['atr'], CFG['garch_lookback']) + 200
+    stop = CFG['stop']
+
     positions = {}
     positions_file = Path(__file__).resolve().parent / 'turtle_positions.json'
     if positions_file.exists():
@@ -419,81 +480,36 @@ def run_full_scan(symbols, tf, entry_days, exit_days, stop, capital, risk_pct, u
         except Exception:
             pass
 
-    okx_pos  = []
-    balance  = None
+    okx_pos, balance = get_account()
+    okx_real = {p['symbol']: p for p in okx_pos}
 
-    if has_auth_config():
-        try:
-            auth_ex  = create_exchange(EXCHANGE_ID, need_auth=True)
-            okx_pos  = fetch_account_positions(auth_ex)
-            balance  = fetch_account_balance(auth_ex)
-            okx_real = {p['symbol']: p for p in okx_pos}
-        except Exception:
-            okx_real = {}
-    else:
-        okx_real = {}
-
-    exchange = create_exchange(EXCHANGE_ID)
-    signals  = []
-
-    progress = st.progress(0, text='拉取数据中...')
-    for i, sym in enumerate(SYMBOLS):
+    signals = []
+    for sym in CFG['symbols']:
         coin = short_name(sym)
-        progress.progress((i + 1) / len(SYMBOLS),
-                          text=f'扫描 {coin} ({i+1}/{len(SYMBOLS)})')
         try:
-            df = fetch_ohlcv(exchange, sym, TIMEFRAME, start_date)
+            df = get_bars(sym, CFG['tf'], bars_needed)
             if df is None or len(df) < bars_needed // 2:
-                signals.append(dict(name=coin, symbol=sym, price=0,
-                                    signal='数据不足', signal_type='none',
-                                    upper=0, lower=0, atr=0,
-                                    exit_lower=0, exit_upper=0,
-                                    garch_expanding=False, garch_vol=0,
-                                    garch_vol_ma=0,
-                                    df=pd.DataFrame(), atr_series=pd.Series(),
-                                    garch_info=None,
-                                    up_l=pd.Series(), lo_l=pd.Series(),
-                                    lo_s=pd.Series(), up_s=pd.Series()))
+                signals.append(_empty_signal(coin, sym, '数据不足 (可能是新上线的币)'))
                 continue
+            garch_info = compute_garch_volatility(df, lookback=CFG['garch_lookback']) if CFG['use_garch'] else None
 
-            # 计算 GARCH (只在启用时)
-            garch_info = compute_garch_volatility(df, lookback=CFG['garch_lookback']) if use_garch else None
-
-            # OKX 持仓同步
-            if sym in okx_real and sym not in positions:
+            if sym in okx_real and sym not in positions:          # 同步 OKX 实盘持仓
                 rp = okx_real[sym]
-                atr_val = compute_atr(df['high'], df['low'],
-                                      df['close'], ATR_PERIOD).iloc[-1]
+                atr_val = compute_atr(df['high'], df['low'], df['close'], CFG['atr']).iloc[-1]
                 dire = rp['side']
-                stop = (rp['entry_price'] - LONG_STOP * atr_val if dire == 'long'
-                        else rp['entry_price'] + SHORT_STOP * atr_val)
                 positions[sym] = dict(
                     direction=dire, entry_price=rp['entry_price'],
-                    stop_loss=stop,
-                    quantity=rp['contracts'] * rp['contract_size'],
-                    atr=atr_val, source='okx',
-                )
+                    stop_loss=(rp['entry_price'] - stop * atr_val if dire == 'long'
+                               else rp['entry_price'] + stop * atr_val),
+                    quantity=rp['contracts'] * rp['contract_size'], atr=atr_val, source='okx')
 
             signals.append(scan_symbol_garch(df, sym, garch_info, positions))
         except Exception as e:
-            signals.append(dict(name=coin, symbol=sym, price=0,
-                                signal=f'获取失败: {e}', signal_type='none',
-                                upper=0, lower=0, atr=0,
-                                exit_lower=0, exit_upper=0,
-                                garch_expanding=False, garch_vol=0,
-                                garch_vol_ma=0,
-                                df=pd.DataFrame(), atr_series=pd.Series(),
-                                garch_info=None,
-                                up_l=pd.Series(), lo_l=pd.Series(),
-                                lo_s=pd.Series(), up_s=pd.Series()))
+            signals.append(_empty_signal(coin, sym, f'获取失败: {e}'))
 
-    progress.empty()
-    scan_time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
-
-    # Telegram 通知
+    scan_time = datetime.now().strftime('%H:%M:%S')
     if has_telegram_config():
         notify_signals(signals)
-
     return signals, okx_pos, balance, scan_time
 
 
@@ -509,12 +525,13 @@ def plot_kline_garch(signal_data):
     df = signal_data.get('df')
     if df is None or df.empty:
         return None
+    df = df.iloc[-CHART_BARS:]                     # 只画最近一段, 页面更快
 
-    up_l = signal_data.get('up_l', pd.Series())
-    lo_s = signal_data.get('lo_s', pd.Series())
-    lo_l = signal_data.get('lo_l', pd.Series())
-    up_s = signal_data.get('up_s', pd.Series())
-    atr_s = signal_data.get('atr_series', pd.Series())
+    up_l = signal_data.get('up_l', pd.Series()).reindex(df.index)
+    lo_s = signal_data.get('lo_s', pd.Series()).reindex(df.index)
+    lo_l = signal_data.get('lo_l', pd.Series()).reindex(df.index)
+    up_s = signal_data.get('up_s', pd.Series()).reindex(df.index)
+    atr_s = signal_data.get('atr_series', pd.Series()).reindex(df.index)
     garch = signal_data.get('garch_info')
 
     # 4 行子图: K线 | GARCH 波动率 | ATR | 成交量
@@ -560,9 +577,9 @@ def plot_kline_garch(signal_data):
 
     # ── Row 2: GARCH 条件波动率 ──
     if garch:
-        cond_vol = garch['cond_vol']
-        vol_ma = garch['vol_ma']
-        expanding = garch['expanding']
+        cond_vol = garch['cond_vol'].reindex(df.index)
+        vol_ma = garch['vol_ma'].reindex(df.index)
+        expanding = garch['expanding'].reindex(df.index).fillna(False).astype(bool)
 
         fig.add_trace(go.Scatter(
             x=df.index, y=cond_vol, name='σ_t (条件波动率)',
@@ -668,10 +685,12 @@ def main():
         tg_status = '✅ 已配置' if has_telegram_config() else '未配置 (不推送)'
         st.markdown(f'**Telegram 通知**: {tg_status}')
 
+        refresh = st.selectbox('自动刷新', list(REFRESH_CHOICES),
+                               index=list(REFRESH_CHOICES).index(DEFAULT_REFRESH), key='refresh',
+                               help='刷新时只拉最新几根K线, 一般一两秒; 历史数据留在内存里')
+        show_chart = st.toggle('显示K线图', value=True, key='show_chart')
         if st.button('🔄 立即刷新', use_container_width=True):
-            st.cache_data.clear()
             st.rerun()
-        st.caption(f'自动刷新间隔: {REFRESH_SECONDS // 3600} 小时')
 
     if not coins:
         st.info('在左侧选择至少一个币种')
@@ -680,14 +699,45 @@ def main():
     global CFG
     CFG = make_cfg(symbols, tf, entry_days, exit_days, stop, capital, risk_pct, use_garch)
 
-    # ── 数据扫描 ──
-    with st.spinner('拉取行情、计算信号...'):
-        signals, okx_pos, balance, scan_time = run_full_scan(
-            symbols, tf, int(entry_days), int(exit_days), float(stop), float(capital), float(risk_pct), use_garch)
-    CFG = make_cfg(symbols, tf, entry_days, exit_days, stop, capital, risk_pct, use_garch)
+    args = (symbols, tf, entry_days, exit_days, stop, capital, risk_pct, use_garch, show_chart)
+    interval = REFRESH_CHOICES[refresh]
+    if interval and hasattr(st, 'fragment'):
+        # 只重跑信号区域, 侧边栏和页面其他部分不动
+        st.fragment(run_every=interval)(render_signals)(*args)
+    else:
+        render_signals(*args)
+        if interval:                                   # 旧版 Streamlit 没有 fragment: 倒计时后整页刷新
+            countdown = st.empty()
+            for remaining in range(interval, 0, -1):
+                countdown.caption(f'⏱ {remaining} 秒后自动刷新')
+                time.sleep(1)
+            st.rerun()
 
-    # ── 顶部统计 ──
-    st.caption(f'⏱ 扫描时间: {scan_time}')
+
+def render_signals(symbols, tf, entry_days, exit_days, stop, capital, risk_pct, use_garch, show_chart):
+    """信号区域: 扫描 + 汇总表 + 逐币种面板."""
+    global CFG
+    CFG = make_cfg(symbols, tf, entry_days, exit_days, stop, capital, risk_pct, use_garch)
+    first_load = any((sym, tf) not in _bar_store() for sym in symbols)
+    if first_load:
+        with st.spinner('第一次加载: 下载历史K线...'):
+            signals, okx_pos, balance, scan_time = run_full_scan()
+    else:
+        signals, okx_pos, balance, scan_time = run_full_scan()
+
+    st.caption(f'⏱ 更新时间: {scan_time}')
+
+    # ── 汇总表: 一眼看全部币 ──
+    rows = []
+    for s_ in signals:
+        p_ = s_['price']
+        rows.append({
+            '': signal_color(s_['signal_type']), '币种': s_['name'], '信号': s_['signal'],
+            '价格': fmt_price(p_) if p_ > 0 else '—',
+            '距上轨': f"{(s_['upper'] - p_) / p_ * 100:+.1f}%" if p_ > 0 and s_.get('upper') else '—',
+            '距下轨': f"{(s_['lower'] - p_) / p_ * 100:+.1f}%" if p_ > 0 and s_.get('lower') else '—',
+        })
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
     # ── 账户余额 ──
     if balance and balance['total'] > 0:
@@ -756,9 +806,9 @@ def main():
             st.caption(s['detail'])
 
         # K 线图
-        fig = plot_kline_garch(s)
+        fig = plot_kline_garch(s) if show_chart else None
         if fig:
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key=f"chart_{s['symbol']}")
 
         st.divider()
 
@@ -779,13 +829,6 @@ def main():
                 c3.metric('持仓量', f"{qty:.4f}")
                 c4.metric('保证金', f"{p['margin']:,.2f} USDT")
 
-    # ── 自动刷新 (倒计时期间改侧边栏参数会立即重新运行) ──
-    countdown = st.empty()
-    for remaining in range(REFRESH_SECONDS, 0, -2):
-        countdown.caption(f'⏱ {remaining // 60} 分钟后自动刷新')
-        time.sleep(2)
-    st.cache_data.clear()
-    st.rerun()
 
 
 if __name__ == '__main__':
