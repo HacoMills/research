@@ -1,0 +1,32 @@
+# 新策略模板的配置. 在 quant 根目录运行:
+#   python -m backtest strategies/_template/configs/example.toml
+# 报告: quant/reports/_template/example_report.md
+name  = "example"
+title = "布林带突破 (模板示例)"
+
+[universe]
+"商品" = ["future:RB", "future:CU", "future:AU", "future:M", "future:TA"]
+"汇率" = ["fx:EURUSD", "fx:USDJPY"]
+
+[data]
+start      = "2019-01-01"
+timeframes = ["1d"]
+
+[strategy]
+signal_module = "strategies/_template/signals.py"   # 自己写的信号在哪
+signal = "myboll:20,2"
+filter = "none"
+
+[portfolio]
+weighting  = "class"
+target_vol = 0.10
+
+[robustness]
+enabled   = false                                   # --robustness 打开
+signals   = ["myboll:20,2", "donchian:60,20", "tsmom:252"]   # 自己的信号和框架自带的放在一起比
+filters   = ["none", "vix:low,80"]
+bootstrap = 1000
+cost_multipliers = [0, 1, 2]
+
+[robustness.grid]
+myboll = [[10, 20, 40, 60], [1.5, 2, 2.5]]

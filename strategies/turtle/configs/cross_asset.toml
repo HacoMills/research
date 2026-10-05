@@ -1,0 +1,50 @@
+# 跨资产组合: 股指 / 国债 / 商品 / 汇率 (参考 TSMOM 论文)
+# 运行 (在 quant 根目录): python -m backtest strategies/turtle/configs/cross_asset.toml
+name  = "cross_asset"                 # 报告文件名: reports/turtle/cross_asset_report.md
+title = "跨资产组合回测"
+
+[universe]                            # 类别 = ["市场:代码", ...]; 市场: future / fx / stock / crypto
+"股指" = ["future:IF", "future:IH", "future:IC", "future:IM"]
+"国债" = ["future:T", "future:TF", "future:TS", "future:TL"]
+"商品" = ["future:RB", "future:I", "future:CU", "future:AL", "future:AU", "future:AG", "future:SC",
+        "future:TA", "future:MA", "future:M", "future:Y", "future:CF", "future:SR"]
+"汇率" = ["fx:USDCNH", "fx:EURUSD", "fx:USDJPY", "fx:AUDUSD", "fx:GBPUSD"]
+# "加密" = ["crypto:BTC", "crypto:ETH"]   # 去掉 # 号即加入加密货币 (日线)
+
+[data]
+start          = "2015-01-01"
+timeframes     = ["1d"]               # 期货/汇率只有日线, 可加 "1w"
+futures_adjust = "diff"               # diff 差值复权 / ratio 比例复权
+futures_source = "sina"               # sina 单月合约自拼 (推荐) / main 新浪主力连续 (未复权)
+
+[strategy]
+signal = "donchian:60,20"             # donchian:20,10 / tsmom:252 / ma:50,200 / 用 + 连接 = 多周期混合
+filter = "none"                       # none / garch / vix:low,80 / vix:high,50
+
+[portfolio]
+weighting      = "class"              # class 类别内等权再类别间等权 / instrument 全部等权
+target_vol     = 0.10                 # 组合目标年化波动, 0 = 不缩放
+instrument_vol = 0                    # 论文做法: 每个品种先缩放到 0.40, 0 = 不缩放
+
+[costs.future]                        # 覆盖默认交易规则 (可删); slippage_ticks = 2 表示每次成交吃 2 跳
+initial_capital = 10_000_000          # 股指/国债一手很贵, 本金给足避免整手取整扭曲仓位
+
+[robustness]
+enabled   = true
+oos_start = "2022-01-01"              # 样本外起点, 留空 = 样本 70% 处
+signals   = ["donchian:60,20", "donchian:20,10", "tsmom:252", "tsmom:126", "ma:50,200",
+             "donchian:20,10 + donchian:60,20 + donchian:120,40 + tsmom:63 + tsmom:126 + tsmom:252"]   # 最后一个: 多周期混合
+filters   = ["none", "garch", "vix:low,80", "vix:high,50"]     # garch 较慢 (几分钟)
+bootstrap = 1000
+block_days = 20
+cost_multipliers = [0, 1, 2, 4]
+
+[robustness.grid]                     # 参数网格: 每个参数的取值 (只扫当前信号那一行)
+donchian = [[20, 40, 60, 100, 150], [10, 20, 30, 50]]
+tsmom    = [[21, 63, 126, 252, 504]]
+ma       = [[10, 20, 50, 100], [100, 150, 200, 300]]
+
+[overlay]                             # 和沪深300 组合: 这个策略有没有用 (报告第八节)
+enabled  = true
+weights  = [0, 0.1, 0.2, 0.3, 0.5]    # 策略占总资金的比例, 其余买沪深300
+overlays = [0.5, 1.0]                 # 股票 100% 不变, 再叠加几倍策略

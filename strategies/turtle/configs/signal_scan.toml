@@ -1,0 +1,63 @@
+# 信号普查: 全部信号 × 每个信号 3 组时间窗口 × 全部过滤器, 跨资产日线 (股指 / 国债 / 商品 / 汇率)
+# 运行 (在 quant 根目录): python -m backtest strategies/turtle/configs/signal_scan.toml
+# 约 34 个信号 × 4 个过滤器 ≈ 136 次全品种回测, 日线约十几到二十分钟
+# 报告: reports/turtle/signal_scan_report.md 第七节; 全部组合明细: reports/turtle/signal_scan_combos.csv
+# 想先快速看一眼: 加 --no-robustness 只跑基准; 或者把 filters 改成 ["none"]
+name  = "signal_scan"
+title = "信号普查: 跨资产日线"
+
+[universe]
+"股指" = ["future:IF", "future:IH", "future:IC", "future:IM"]
+"国债" = ["future:T", "future:TF", "future:TS", "future:TL"]
+"商品" = ["future:RB", "future:I", "future:CU", "future:AL", "future:AU", "future:AG", "future:SC",
+        "future:TA", "future:MA", "future:M", "future:Y", "future:CF", "future:SR"]
+"汇率" = ["fx:USDCNH", "fx:EURUSD", "fx:USDJPY", "fx:AUDUSD", "fx:GBPUSD"]
+
+[data]
+start          = "2015-01-01"
+timeframes     = ["1d"]
+futures_adjust = "diff"
+
+[strategy]
+signal = "donchian:60,20"             # 报告主体用的信号 (作为基准)
+filter = "none"
+
+[portfolio]
+weighting  = "class"
+target_vol = 0.10
+
+[costs.future]
+initial_capital = 10_000_000
+
+[robustness]
+enabled   = true
+oos_start = "2022-01-01"
+combos    = true                      # 信号 × 过滤器全组合
+
+# 分时期看夏普的分界日期 (不写就按年). 下面分成 2015-17 / 2018-19 / 2020-21 / 2022-23 / 2024-26 五段
+periods   = ["2018-01-01", "2020-01-01", "2022-01-01", "2024-01-01"]
+
+# 7.1 换信号对比 (会画累计收益图, 所以只放每类的代表参数)
+signals   = ["donchian:60,20", "tsmom:252", "ma:50,200", "boll:20,2", "keltner:20,2",
+             "supertrend:10,3", "ma3:10,30,100", "regress:60,2", "riskmom:252,0.5",
+             "knrp:9,2", "emavwap:200,0.5,60,40,3",
+             "donchian:20,10 + donchian:60,20 + donchian:120,40 + tsmom:63 + tsmom:126 + tsmom:252"]
+
+filters   = ["none", "garch", "vix:low,80", "vix:high,50"]
+bootstrap = 1000
+cost_multipliers = [0, 1, 2, 4]
+
+# 组合普查额外展开的时间窗口: 每个信号 短 / 中 / 长 三组参数 (单位: 天)
+# 上面 signals 里的也会参加普查, 重复的自动去掉
+[robustness.windows]
+donchian   = ["20,10", "60,20", "120,40"]
+tsmom      = ["63", "126", "252"]
+ma         = ["20,60", "50,200", "100,250"]
+boll       = ["20,2", "60,2", "120,2"]
+keltner    = ["20,2", "60,2", "120,2"]
+supertrend = ["10,3", "20,3", "50,3"]
+ma3        = ["5,20,60", "10,30,100", "20,60,200"]
+regress    = ["20,2", "60,2", "120,2"]
+riskmom    = ["63,0.5", "126,0.5", "252,0.5"]
+knrp       = ["9,2", "20,5", "50,10"]
+emavwap    = ["50,0.5,60,40,3", "100,0.5,60,40,3", "200,0.5,60,40,3"]

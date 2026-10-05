@@ -1,0 +1,50 @@
+# 信号普查: 全部信号 × 全部过滤器, 加密货币 4 小时线
+# 运行 (在 quant 根目录): python -m backtest strategies/turtle/configs/crypto_scan.toml
+# 每个信号 3 组时间窗口 × 4 个过滤器 ≈ 130 组回测, 4h 数据量大, 可能要半小时以上
+# 想快一点: 把 filters 改成 ["none", "vix:low,80"] (garch 在 4h 上最慢), 或删掉一些窗口
+name  = "crypto_scan"
+title = "信号普查: 加密货币 4h"
+
+[universe]
+"加密" = ["crypto:BTC", "crypto:ETH", "crypto:SOL", "crypto:XRP", "crypto:DOGE", "crypto:ADA",
+        "crypto:AVAX", "crypto:LINK", "crypto:DOT", "crypto:LTC", "crypto:BCH", "crypto:TRX",
+        "crypto:UNI", "crypto:ATOM"]
+
+[data]
+start        = "2022-01-01"
+crypto_start = "2022-01-01"
+timeframes   = ["4h"]
+
+[strategy]
+signal = "donchian:60,20"
+filter = "none"
+
+[portfolio]
+weighting  = "instrument"
+target_vol = 0
+
+[robustness]
+enabled   = true
+oos_start = "2024-07-01"
+combos    = true
+periods   = ["2022-01-01", "2023-01-01", "2024-01-01", "2025-01-01"]   # 分时期夏普的分界 (不写就按年)
+signals   = ["donchian:60,20", "tsmom:90", "ma:20,100", "boll:20,2", "keltner:20,2",
+             "supertrend:10,3", "ma3:10,30,100", "regress:30,2", "riskmom:90,0.5",
+             "knrp:9,2", "emavwap:200,0.5,60,40,3"]
+filters   = ["none", "garch", "vix:low,80", "vix:high,50"]
+bootstrap = 1000
+cost_multipliers = [0, 1, 2, 4]
+
+# 组合普查额外展开的时间窗口 (单位: 天; 4h 线 1 天 = 6 根)
+[robustness.windows]
+donchian   = ["10,5", "20,10", "60,20"]
+tsmom      = ["30", "90", "180"]
+ma         = ["10,50", "20,100", "50,200"]
+boll       = ["10,2", "20,2", "60,2"]
+keltner    = ["10,2", "20,2", "60,2"]
+supertrend = ["5,3", "10,3", "30,3"]
+ma3        = ["5,20,60", "10,30,100", "20,60,200"]
+regress    = ["10,2", "30,2", "90,2"]
+riskmom    = ["30,0.5", "90,0.5", "180,0.5"]
+knrp       = ["9,2", "20,5", "50,10"]
+emavwap    = ["50,0.5,60,40,3", "100,0.5,60,40,3", "200,0.5,60,40,3"]

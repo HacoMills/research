@@ -1,0 +1,10 @@
+pandas
+numpy
+matplotlib
+arch
+ccxt
+akshare
+requests
+python-calamine
+streamlit
+plotly
