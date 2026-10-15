@@ -4,7 +4,7 @@
 
 跨资产趋势跟踪策略研究 + 一套可复用的分层回测框架（Python）。
 
-在国内股指、国债、商品期货和外汇共 26 个品种上复现并扩展 Moskowitz, Ooi & Pedersen (2012) 的时间序列动量（TSMOM）。
+在国内股指、国债、商品期货和外汇共 26 个品种上复现并扩展 Moskowitz, Ooi & Pedersen (2012) 的时间序列动量（TSMOM），重点不在"调出一条漂亮曲线"，而在**避免前视偏差、识别过拟合、诚实评估结果**。
 
 ---
 
@@ -31,7 +31,7 @@
 - **分散化**：跨类别品种两两相关性平均 0.02
 - **统计显著性**：20 天分块自助法，夏普 95% 置信区间 [0.04, 1.20]
 
-### 和沪深300 组合
+### 和沪深300 组合：这个策略有什么用
 
 ![沪深300 与策略组合](figures/turtle/cross_asset_mix_csi300.png)
 
@@ -42,7 +42,22 @@
 | 沪深300 70% + 策略 30% | +2.6% | 0.25 | -30.7% |
 | 沪深300 50% + 策略 50% | +3.8% | 0.39 | -20.3% |
 
-策略与沪深300 月度相关性 -0.01。加入策略后夏普上升、最大回撤减半。（沪深300 为价格指数，未含约 2%/年的分红。）
+策略与沪深300 月度相关性 -0.01。加入策略后夏普上升、最大回撤减半，这是趋势策略的主要价值。（沪深300 为价格指数，未含约 2%/年的分红。）
+
+### 多策略组合：趋势 + 买入持有 + 外汇利差
+
+![组合净值、回撤与滚动夏普](figures/turtle/combo_bh.png)
+
+趋势与同品种买入持有月度相关性约 0.03，外汇利差与买入持有为 -0.45。三条收益流按滚动风险平价合成（权重 ∝ 1/过去 250 天 EWMA 波动，滞后一天），整体缩放到 10% 波动，杠杆上限 1.5。外汇利差规则在看结果前固定（`strategies/turtle/fx_carry.py`）；汇率的买入持有方向没有风险溢价，因此只在买入持有里去掉汇率。区间 2019-03 ~ 2026-09（四类资产数据齐全以后）。
+
+| | 夏普 | 年化收益 | 年化波动 | 最大回撤 |
+|---|---:|---:|---:|---:|
+| 趋势（单独） | 0.64 | +6.4% | 10.0% | -11.7% |
+| 买入持有（去汇率） | 0.83 | +8.3% | 10.0% | -13.1% |
+| 外汇利差 | 0.53 | +5.2% | 9.9% | -12.0% |
+| **三者风险平价组合** | **1.22** | **+9.9%** | 8.1% | **-6.2%** |
+
+分段看：2019.3–2022.6 组合夏普 1.64，2022.7–2026.9 为 0.89（外汇利差后段夏普只有 0.19）。完整对比（含事后挑选的方案，仅供参考）见 [reports/turtle/combo_bh_report.md](reports/turtle/combo_bh_report.md)。
 
 ### 稳定性检验
 
@@ -61,11 +76,11 @@
 ```
 backtest/
 ├── markets.py      第 1 层 数据接口: "市场:代码" → K线; 各市场交易规则 (手续费、按最小变动价位的滑点、合约乘数、涨跌停)
-├── signals.py      第 2 层 信号: 11 种趋势信号 (唐奇安、TSMOM、均线、布林带、肯特纳、SuperTrend 等) + 多周期混合, 字符串切换; 可加载自定义信号
+├── signals.py      第 2 层 信号: donchian / tsmom / ma / 多周期混合, 字符串切换; 可加载自定义信号
 ├── filters.py      第 3 层 过滤: GARCH (滚动估计) / VIX (中国 QVIX、美国 VIX 滞后一天)
 ├── engine.py       执行: 1% 风险 / ATR 定仓位、止损跳空、滑点、逐根盯市
 ├── portfolio.py    第 4 层 组合: 跨资产 / 跨周期, 两层等权, 事前波动率目标化
-├── robustness.py   第 5 层 稳定性: 信号 / 过滤器对比、信号 × 时间窗口 × 过滤器组合普查、分时期夏普、参数网格、样本内外、分块自助法、成本敏感性
+├── robustness.py   第 5 层 稳定性: 信号 / 过滤器对比、参数网格、样本内外、分块自助法、成本敏感性
 ├── overlay.py      与沪深300 组合分析
 └── report.py       第 6 层 报告: Markdown + 图表
 ```
@@ -121,7 +136,7 @@ python -m backtest strategies/turtle/configs/cross_asset.toml --signal tsmom:252
 
 A cross-asset trend-following research project and a reusable, layered backtesting framework in Python.
 
-It replicates and extends the time-series momentum (TSMOM) study of Moskowitz, Ooi & Pedersen (2012) on 26 instruments across Chinese equity-index futures, government-bond futures, commodity futures and FX.
+It replicates and extends the time-series momentum (TSMOM) study of Moskowitz, Ooi & Pedersen (2012) on 26 instruments across Chinese equity-index futures, government-bond futures, commodity futures and FX. The focus is not on producing a pretty equity curve, but on **avoiding look-ahead bias, detecting overfitting, and evaluating results honestly**.
 
 ---
 
@@ -148,7 +163,7 @@ Backtest period Jul 2015 – Sep 2026, daily bars, Donchian channel 60/20. Instr
 - **Diversification**: average pairwise correlation across asset classes is 0.02
 - **Statistical significance**: block bootstrap (20-day blocks) 95% confidence interval for the Sharpe ratio is [0.04, 1.20]
 
-### Combined with the CSI 300
+### Combined with the CSI 300: what the strategy is good for
 
 ![CSI 300 combined with the strategy](figures/turtle/cross_asset_mix_csi300.png)
 
@@ -159,7 +174,22 @@ Backtest period Jul 2015 – Sep 2026, daily bars, Donchian channel 60/20. Instr
 | CSI 300 70% + strategy 30% | +2.6% | 0.25 | -30.7% |
 | CSI 300 50% + strategy 50% | +3.8% | 0.39 | -20.3% |
 
-The monthly correlation between the strategy and the CSI 300 is -0.01. Adding the strategy raises the Sharpe ratio and cuts the maximum drawdown in half. (The CSI 300 here is the price index and excludes roughly 2% per year of dividends.)
+The monthly correlation between the strategy and the CSI 300 is -0.01. Adding the strategy raises the Sharpe ratio and cuts the maximum drawdown in half, which is the main value of a trend-following sleeve. (The CSI 300 here is the price index and excludes roughly 2% per year of dividends.)
+
+### Multi-strategy portfolio: trend + buy-and-hold + FX carry
+
+![Combined equity, drawdown and rolling Sharpe](figures/turtle/combo_bh.png)
+
+Trend and same-universe buy-and-hold have a monthly correlation of about 0.03; FX carry vs buy-and-hold is -0.45. The three return streams are combined with rolling risk parity (weights ∝ 1 / 250-day EWMA vol, lagged one day), scaled to 10% vol with leverage capped at 1.5. FX carry rules were fixed before looking at results (`strategies/turtle/fx_carry.py`); FX buy-and-hold has no risk premium, so FX is dropped from the buy-and-hold leg only. Sample 2019-03 to 2026-09 (all four asset classes available).
+
+| | Sharpe | Ann. return | Ann. vol | Max DD |
+|---|---:|---:|---:|---:|
+| Trend (alone) | 0.64 | +6.4% | 10.0% | -11.7% |
+| Buy-and-hold (ex-FX) | 0.83 | +8.3% | 10.0% | -13.1% |
+| FX carry | 0.53 | +5.2% | 9.9% | -12.0% |
+| **Risk-parity combo** | **1.22** | **+9.9%** | 8.1% | **-6.2%** |
+
+By sub-period: combo Sharpe 1.64 in 2019.3–2022.6 and 0.89 in 2022.7–2026.9 (FX carry alone only 0.19 in the later half). Full comparison, including ex-post variants for reference only: [reports/turtle/combo_bh_report.md](reports/turtle/combo_bh_report.md).
 
 ### Robustness checks
 
@@ -178,11 +208,11 @@ The monthly correlation between the strategy and the CSI 300 is -0.01. Adding th
 ```
 backtest/
 ├── markets.py      Layer 1 data interface: "market:symbol" -> bars; per-market rules (fees, tick-size slippage, contract multipliers, price limits)
-├── signals.py      Layer 2 signals: 11 trend signals (Donchian, TSMOM, MA crossover, Bollinger, Keltner, SuperTrend, etc.) + multi-speed blends, switched by a string; custom signals can be plugged in
+├── signals.py      Layer 2 signals: donchian / tsmom / ma / multi-speed blends, switched by a string; custom signals can be plugged in
 ├── filters.py      Layer 3 filters: GARCH (rolling re-estimation) / VIX (China QVIX, US VIX lagged one day)
 ├── engine.py       Execution: 1% risk / ATR position sizing, gap-aware stops, slippage, bar-by-bar mark-to-market
 ├── portfolio.py    Layer 4 portfolio: cross-asset / cross-timeframe, two-level equal weighting, ex-ante volatility targeting
-├── robustness.py   Layer 5 robustness: signal / filter comparison, signal × lookback × filter scan, Sharpe by sub-period, parameter grid, in- vs out-of-sample, block bootstrap, cost sensitivity
+├── robustness.py   Layer 5 robustness: signal / filter comparison, parameter grid, in- vs out-of-sample, block bootstrap, cost sensitivity
 ├── overlay.py      Combination analysis with the CSI 300
 └── report.py       Layer 6 reporting: Markdown + charts
 ```

@@ -1,0 +1,43 @@
+# 机器学习时序信号: 跨资产 (和 turtle/cross_asset.toml 同一批品种, 方便对比)
+# 运行 (在 quant 根目录):
+#   python -m backtest strategies/ml_signal/configs/cross_asset_ml.toml
+#   python -m backtest strategies/ml_signal/configs/cross_asset_ml.toml --signal ridge:5
+name  = "cross_asset_ml"
+title = "跨资产组合回测: 机器学习信号"
+
+[universe]
+"股指" = ["future:IF", "future:IH", "future:IC", "future:IM"]
+"国债" = ["future:T", "future:TF", "future:TS", "future:TL"]
+"商品" = ["future:RB", "future:I", "future:CU", "future:AL", "future:AU", "future:AG", "future:SC",
+        "future:TA", "future:MA", "future:M", "future:Y", "future:CF", "future:SR"]
+"汇率" = ["fx:USDCNH", "fx:EURUSD", "fx:USDJPY", "fx:AUDUSD", "fx:GBPUSD"]
+
+[data]
+start          = "2015-01-01"
+timeframes     = ["1d"]
+futures_adjust = "diff"
+futures_source = "sina"
+
+[strategy]
+signal = "xgb:5"                      # xgb / lgbm / mlp / ridge : 预测天数, 阈值, 训练天数, 重训间隔
+filter = "none"
+
+[portfolio]
+weighting      = "class"
+target_vol     = 0.10
+instrument_vol = 0
+
+[costs.future]
+initial_capital = 10_000_000
+
+[robustness]
+enabled   = false                     # 打开会对每个信号重新滚动训练, 很慢
+oos_start = "2022-01-01"
+signals   = ["donchian:60,20", "tsmom:252", "ridge:5", "xgb:5"]
+filters   = ["none"]
+bootstrap = 1000
+block_days = 20
+cost_multipliers = [0, 1, 2, 4]
+
+[overlay]
+enabled = false

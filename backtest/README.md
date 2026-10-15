@@ -168,6 +168,42 @@ python -m backtest strategies/bollinger/configs/example.toml
 
 ---
 
+## 截面因子 (`cross_section.py`)
+
+上面的引擎是单品种时序的 (开/平仓布尔信号)。WorldQuant 101 这类 `rank()` 截面因子用 `cross_section.py`：
+
+- 数据：`load_panel(codes)` → `{open, high, low, close, volume, pct_chg}` 宽表 (日期 × 股票)，默认新浪后复权
+- 算子：`rank` (截面) / `ts_mean` / `ts_std` / `ts_decay_linear`
+- 组合：`long_short_weights` (多空中性) / `quantile_weights` (分组)；停牌、一字板、封板当天不调仓
+- 收益：`portfolio_returns(w, P, cost, execution)`，`close` = 当天收盘成交，`open` = 次日开盘成交
+- 评估：`rank_ic`、`ic_summary`、换手率
+
+例子：`python strategies/xs_alpha/run.py` (沪深300 成分股，报告在 `reports/xs_alpha/`)
+
+---
+
+## 机器学习信号 (`ml.py`)
+
+模型可选 `ridge` / `xgb` / `lgbm` / `mlp` (神经网络)，超参数事先固定。全部用**滚动训练**：在 T 日重训时只用 T 日以前的样本，预测下一段；训练集和测试集之间留出预测天数的**隔离期** (标签是未来 h 天收益，t 日的标签要到 t+h 才知道)。
+
+**时序** (接到信号层，和 donchian 一样用)：
+
+```
+python -m backtest strategies/ml_signal/configs/cross_asset_ml.toml --signal xgb:5
+```
+
+`xgb:预测天数,阈值,训练天数,重训间隔天数`，默认 `xgb:5,0,756,63`。每个品种用自己的 13 个波动率标准化特征 (多周期动量、通道位置、离均线距离、波动率比) 预测未来收益，预测 > 阈值做多、< −阈值做空。需要约 4 年数据预热 (特征 1 年 + 训练 3 年)。
+
+**截面** (接到 `cross_section.py`)：
+
+```python
+alpha, importance = ml.ml_alpha(P, model="xgb", horizon=1)
+```
+
+15 个量价特征做截面排名，所有股票叠在一起训练，标签是下一期收益的截面排名。例子：`python strategies/ml_signal/run_xs.py`。
+
+---
+
 ## 信号普查：一次测完所有信号、时间窗口和过滤器
 
 ```

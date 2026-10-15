@@ -22,6 +22,11 @@
                    大周期: 日内K线用日线 EMA(200 天), 日线用周线 EMA(50 周), 只用已收完的大周期K线.
                    需要成交量和最高/最低价: 外汇 (无成交量) 和只有收盘价的 CSMAR 数据不产生信号.
 
+机器学习信号 (ml.py, 滚动训练, 每个品种用自己的历史):
+  xgb:5 / lgbm:5 / mlp:5 / ridge:5
+                   预测未来 5 天 (波动率标准化后的) 收益, 预测 > 0 做多、< 0 做空.
+                   完整写法 xgb:预测天数,阈值,训练天数,重训间隔天数, 例如 xgb:5,0.1,756,63
+
 多周期混合: 用 + 连接多个信号, 每个品种上各自独立跑, 日收益取平均 (相当于把资金平分给几个子策略)
   donchian:20,10 + donchian:60,20 + donchian:120,40 + tsmom:63 + tsmom:126 + tsmom:252
 
@@ -496,3 +501,7 @@ def parse_signal(spec: str) -> Signal:
         else:
             args.append(float(part))
     return SIGNALS[name](*args, **kwargs)
+
+
+# 机器学习信号 (xgb / lgbm / mlp / ridge) 在 ml.py 里定义, 导入时自动登记到 SIGNALS
+from . import ml  # noqa: E402,F401
