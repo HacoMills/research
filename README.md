@@ -10,6 +10,25 @@
 
 ## 主要结果
 
+### 多策略组合：趋势 + 买入持有 + 外汇利差
+
+![组合净值、回撤与滚动夏普](figures/turtle/combo_bh.png)
+
+| 2019-03 ~ 2026-09 | 夏普 | 年化收益 | 年化波动 | 最大回撤 |
+|---|---:|---:|---:|---:|
+| **三策略风险平价组合** | **1.35** | **+10.8%** | 8.0% | **-6.0%** |
+| 趋势（去汇率） | 0.85 | +8.3% | 9.7% | -9.6% |
+| 买入持有（去汇率） | 0.83 | +8.3% | 10.0% | -13.1% |
+| 外汇利差 | 0.53 | +5.2% | 9.9% | -12.0% |
+| 参照：原趋势策略（含汇率） | 0.64 | +6.4% | 10.0% | -11.7% |
+
+- 三条收益流月度相关 -0.41 ~ 0.03；按滚动风险平价合成（权重 ∝ 1/过去 250 天 EWMA 波动，滞后一天），整体缩放到 10% 波动，杠杆上限 1.5
+- 外汇趋势 2015 年后失效（见下方稳定性检验），趋势腿去掉外汇；汇率买入持有没有风险溢价，同样去掉；外汇只通过利差策略参与，利差规则在看结果前固定（`strategies/turtle/fx_carry.py`）
+- 分段：2019.3–2022.6 夏普 1.76，2022.7–2026.9 夏普 1.03（外汇利差后段只有 0.19）
+- 去掉外汇趋势这一步用到了 2015 年后的信息，不算严格样本外；全部规则事前固定的版本夏普 1.22。完整对比见 [reports/turtle/combo_bh_report.md](reports/turtle/combo_bh_report.md)
+
+### 单一趋势策略
+
 回测区间 2015-07 ~ 2026-09，日线，唐奇安通道 60/20，组合按类别两层等权并缩放到 10% 年化波动。
 
 ![策略净值与回撤](figures/turtle/cross_asset_portfolio.png)
@@ -43,21 +62,6 @@
 | 沪深300 50% + 策略 50% | +3.8% | 0.39 | -20.3% |
 
 策略与沪深300 月度相关性 -0.01。加入策略后夏普上升、最大回撤减半，这是趋势策略的主要价值。（沪深300 为价格指数，未含约 2%/年的分红。）
-
-### 多策略组合：趋势 + 买入持有 + 外汇利差
-
-![组合净值、回撤与滚动夏普](figures/turtle/combo_bh.png)
-
-趋势与同品种买入持有月度相关性约 0.03，外汇利差与买入持有为 -0.45。三条收益流按滚动风险平价合成（权重 ∝ 1/过去 250 天 EWMA 波动，滞后一天），整体缩放到 10% 波动，杠杆上限 1.5。外汇利差规则在看结果前固定（`strategies/turtle/fx_carry.py`）；汇率的买入持有方向没有风险溢价，因此只在买入持有里去掉汇率。区间 2019-03 ~ 2026-09（四类资产数据齐全以后）。
-
-| | 夏普 | 年化收益 | 年化波动 | 最大回撤 |
-|---|---:|---:|---:|---:|
-| 趋势（单独） | 0.64 | +6.4% | 10.0% | -11.7% |
-| 买入持有（去汇率） | 0.83 | +8.3% | 10.0% | -13.1% |
-| 外汇利差 | 0.53 | +5.2% | 9.9% | -12.0% |
-| **三者风险平价组合** | **1.22** | **+9.9%** | 8.1% | **-6.2%** |
-
-分段看：2019.3–2022.6 组合夏普 1.64，2022.7–2026.9 为 0.89（外汇利差后段夏普只有 0.19）。完整对比（含事后挑选的方案，仅供参考）见 [reports/turtle/combo_bh_report.md](reports/turtle/combo_bh_report.md)。
 
 ### 稳定性检验
 
@@ -142,6 +146,25 @@ It replicates and extends the time-series momentum (TSMOM) study of Moskowitz, O
 
 ## Key Results
 
+### Multi-strategy portfolio: trend + buy-and-hold + FX carry
+
+![Combined equity, drawdown and rolling Sharpe](figures/turtle/combo_bh.png)
+
+| 2019-03 to 2026-09 | Sharpe | Ann. return | Ann. vol | Max DD |
+|---|---:|---:|---:|---:|
+| **Risk-parity combo** | **1.35** | **+10.8%** | 8.0% | **-6.0%** |
+| Trend (ex-FX) | 0.85 | +8.3% | 9.7% | -9.6% |
+| Buy-and-hold (ex-FX) | 0.83 | +8.3% | 10.0% | -13.1% |
+| FX carry | 0.53 | +5.2% | 9.9% | -12.0% |
+| Reference: original trend (incl. FX) | 0.64 | +6.4% | 10.0% | -11.7% |
+
+- Monthly correlations between the three streams range from -0.41 to 0.03; combined with rolling risk parity (weights ∝ 1 / 250-day EWMA vol, lagged one day), scaled to 10% vol, leverage capped at 1.5
+- FX trend stopped working after 2015 (see robustness checks), so the trend leg excludes FX; FX buy-and-hold has no risk premium and is dropped too; FX enters only via carry, whose rules were fixed before looking at results (`strategies/turtle/fx_carry.py`)
+- Sub-periods: Sharpe 1.76 in 2019.3–2022.6, 1.03 in 2022.7–2026.9 (FX carry alone only 0.19 in the later half)
+- Dropping FX trend uses post-2015 information, so it is not strictly out-of-sample; the fully ex-ante version has Sharpe 1.22. Full comparison: [reports/turtle/combo_bh_report.md](reports/turtle/combo_bh_report.md)
+
+### Single trend strategy
+
 Backtest period Jul 2015 – Sep 2026, daily bars, Donchian channel 60/20. Instruments are equal-weighted within each asset class, classes are equal-weighted, and the portfolio is scaled to 10% annualized volatility.
 
 ![Strategy equity curve and drawdown](figures/turtle/cross_asset_portfolio.png)
@@ -175,21 +198,6 @@ Backtest period Jul 2015 – Sep 2026, daily bars, Donchian channel 60/20. Instr
 | CSI 300 50% + strategy 50% | +3.8% | 0.39 | -20.3% |
 
 The monthly correlation between the strategy and the CSI 300 is -0.01. Adding the strategy raises the Sharpe ratio and cuts the maximum drawdown in half, which is the main value of a trend-following sleeve. (The CSI 300 here is the price index and excludes roughly 2% per year of dividends.)
-
-### Multi-strategy portfolio: trend + buy-and-hold + FX carry
-
-![Combined equity, drawdown and rolling Sharpe](figures/turtle/combo_bh.png)
-
-Trend and same-universe buy-and-hold have a monthly correlation of about 0.03; FX carry vs buy-and-hold is -0.45. The three return streams are combined with rolling risk parity (weights ∝ 1 / 250-day EWMA vol, lagged one day), scaled to 10% vol with leverage capped at 1.5. FX carry rules were fixed before looking at results (`strategies/turtle/fx_carry.py`); FX buy-and-hold has no risk premium, so FX is dropped from the buy-and-hold leg only. Sample 2019-03 to 2026-09 (all four asset classes available).
-
-| | Sharpe | Ann. return | Ann. vol | Max DD |
-|---|---:|---:|---:|---:|
-| Trend (alone) | 0.64 | +6.4% | 10.0% | -11.7% |
-| Buy-and-hold (ex-FX) | 0.83 | +8.3% | 10.0% | -13.1% |
-| FX carry | 0.53 | +5.2% | 9.9% | -12.0% |
-| **Risk-parity combo** | **1.22** | **+9.9%** | 8.1% | **-6.2%** |
-
-By sub-period: combo Sharpe 1.64 in 2019.3–2022.6 and 0.89 in 2022.7–2026.9 (FX carry alone only 0.19 in the later half). Full comparison, including ex-post variants for reference only: [reports/turtle/combo_bh_report.md](reports/turtle/combo_bh_report.md).
 
 ### Robustness checks
 
