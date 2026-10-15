@@ -4,7 +4,9 @@
 
 跨资产趋势跟踪策略研究 + 一套可复用的分层回测框架（Python）。
 
-在国内股指、国债、商品期货和外汇共 26 个品种上复现并扩展 Moskowitz, Ooi & Pedersen (2012) 的时间序列动量（TSMOM），重点不在"调出一条漂亮曲线"，而在**避免前视偏差、识别过拟合、诚实评估结果**。
+在国内股指、国债、商品期货和外汇共 26 个品种上复现并扩展 Moskowitz, Ooi & Pedersen (2012) 的时间序列动量（TSMOM）。
+
+> **核心结论：趋势 + 买入持有 + 外汇利差三策略风险平价组合，2019–2026 年夏普 1.22、年化 9.9%、最大回撤 -6.2%；单一趋势策略夏普 0.64、最大回撤 -11.7%。组合规则全部在看结果前固定。**
 
 ---
 
@@ -16,16 +18,15 @@
 
 | 2019-03 ~ 2026-09 | 夏普 | 年化收益 | 年化波动 | 最大回撤 |
 |---|---:|---:|---:|---:|
-| **三策略风险平价组合** | **1.35** | **+10.8%** | 8.0% | **-6.0%** |
-| 趋势（去汇率） | 0.85 | +8.3% | 9.7% | -9.6% |
+| **三策略风险平价组合** | **1.22** | **+9.9%** | 8.1% | **-6.2%** |
+| 趋势（单独） | 0.64 | +6.4% | 10.0% | -11.7% |
 | 买入持有（去汇率） | 0.83 | +8.3% | 10.0% | -13.1% |
 | 外汇利差 | 0.53 | +5.2% | 9.9% | -12.0% |
-| 参照：原趋势策略（含汇率） | 0.64 | +6.4% | 10.0% | -11.7% |
 
 - 三条收益流月度相关 -0.41 ~ 0.03；按滚动风险平价合成（权重 ∝ 1/过去 250 天 EWMA 波动，滞后一天），整体缩放到 10% 波动，杠杆上限 1.5
-- 外汇趋势 2015 年后失效（见下方稳定性检验），趋势腿去掉外汇；汇率买入持有没有风险溢价，同样去掉；外汇只通过利差策略参与，利差规则在看结果前固定（`strategies/turtle/fx_carry.py`）
-- 分段：2019.3–2022.6 夏普 1.76，2022.7–2026.9 夏普 1.03（外汇利差后段只有 0.19）
-- 去掉外汇趋势这一步用到了 2015 年后的信息，不算严格样本外；全部规则事前固定的版本夏普 1.22。完整对比见 [reports/turtle/combo_bh_report.md](reports/turtle/combo_bh_report.md)
+- 规则全部事前固定：汇率买入持有没有风险溢价，事前就从买入持有里去掉；外汇利差规则在看结果前确定（`strategies/turtle/fx_carry.py`）
+- 分段：2019.3–2022.6 夏普 1.64，2022.7–2026.9 夏普 0.89（外汇利差后段只有 0.19）
+- 若再从趋势里去掉外汇（2015 年后外汇趋势失效），组合夏普 1.35；这一步用到了事后信息，仅供参考。完整对比见 [reports/turtle/combo_bh_report.md](reports/turtle/combo_bh_report.md)
 
 ### 单一趋势策略
 
@@ -140,11 +141,13 @@ python -m backtest strategies/turtle/configs/cross_asset.toml --signal tsmom:252
 
 A cross-asset trend-following research project and a reusable, layered backtesting framework in Python.
 
-It replicates and extends the time-series momentum (TSMOM) study of Moskowitz, Ooi & Pedersen (2012) on 26 instruments across Chinese equity-index futures, government-bond futures, commodity futures and FX. The focus is not on producing a pretty equity curve, but on **avoiding look-ahead bias, detecting overfitting, and evaluating results honestly**.
+It replicates and extends the time-series momentum (TSMOM) study of Moskowitz, Ooi & Pedersen (2012) on 26 instruments across Chinese equity-index futures, government-bond futures, commodity futures and FX.
 
 ---
 
 ## Key Results
+
+> **Bottom line: a risk-parity portfolio of trend + buy-and-hold + FX carry delivers Sharpe 1.22, 9.9% p.a., max drawdown -6.2% over 2019–2026, vs Sharpe 0.64 and -11.7% for trend alone. All portfolio rules were fixed before looking at results.**
 
 ### Multi-strategy portfolio: trend + buy-and-hold + FX carry
 
@@ -152,16 +155,15 @@ It replicates and extends the time-series momentum (TSMOM) study of Moskowitz, O
 
 | 2019-03 to 2026-09 | Sharpe | Ann. return | Ann. vol | Max DD |
 |---|---:|---:|---:|---:|
-| **Risk-parity combo** | **1.35** | **+10.8%** | 8.0% | **-6.0%** |
-| Trend (ex-FX) | 0.85 | +8.3% | 9.7% | -9.6% |
+| **Risk-parity combo** | **1.22** | **+9.9%** | 8.1% | **-6.2%** |
+| Trend (alone) | 0.64 | +6.4% | 10.0% | -11.7% |
 | Buy-and-hold (ex-FX) | 0.83 | +8.3% | 10.0% | -13.1% |
 | FX carry | 0.53 | +5.2% | 9.9% | -12.0% |
-| Reference: original trend (incl. FX) | 0.64 | +6.4% | 10.0% | -11.7% |
 
 - Monthly correlations between the three streams range from -0.41 to 0.03; combined with rolling risk parity (weights ∝ 1 / 250-day EWMA vol, lagged one day), scaled to 10% vol, leverage capped at 1.5
-- FX trend stopped working after 2015 (see robustness checks), so the trend leg excludes FX; FX buy-and-hold has no risk premium and is dropped too; FX enters only via carry, whose rules were fixed before looking at results (`strategies/turtle/fx_carry.py`)
-- Sub-periods: Sharpe 1.76 in 2019.3–2022.6, 1.03 in 2022.7–2026.9 (FX carry alone only 0.19 in the later half)
-- Dropping FX trend uses post-2015 information, so it is not strictly out-of-sample; the fully ex-ante version has Sharpe 1.22. Full comparison: [reports/turtle/combo_bh_report.md](reports/turtle/combo_bh_report.md)
+- All rules fixed ex ante: FX buy-and-hold has no risk premium and is dropped from the buy-and-hold leg; FX carry rules were set before looking at results (`strategies/turtle/fx_carry.py`)
+- Sub-periods: Sharpe 1.64 in 2019.3–2022.6, 0.89 in 2022.7–2026.9 (FX carry alone only 0.19 in the later half)
+- Also dropping FX from the trend leg (FX trend failed after 2015) lifts Sharpe to 1.35, but uses hindsight; reference only. Full comparison: [reports/turtle/combo_bh_report.md](reports/turtle/combo_bh_report.md)
 
 ### Single trend strategy
 
